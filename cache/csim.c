@@ -1,6 +1,7 @@
 #include "cachelab.h"
 #include <assert.h>
 #include <getopt.h>
+#include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -117,7 +118,7 @@ void break_down_set(set_t *set) {
     break_down_line(&set->lines[i]);
   }
 
-  free(set->lines);
+  // free(set->lines);
   free(set);
 }
 
@@ -142,7 +143,7 @@ void getblockFromSet(set_t *set) {} // NOTE: not required
 
 size_t line_to_evict(set_t *set) {
   // evict based on a cache eviction policy
-  printf("evicting %d\n", set->line_count);
+  // printf("evicting %ld\n", set->line_count);
   return 0;
 }
 
@@ -190,14 +191,13 @@ void execute_operation_in_cache(
     size_t size,        // NOTE: ignore the size and assume the
     unsigned int *miss, // accesses are aligned perfectly
     unsigned int *hit, unsigned int *eviction) {
-  size_t set_mask = 0LL; // TODO: get set mask
-  size_t setIndex = set_mask & address;
+  size_t set_mask = (1UL << cache->s) - 1; // TODO: get set mask
+  size_t block_mask = (1UL << cache->b) - 1;
 
-  size_t tag_mask = 0LL;
-  size_t tag = tag_mask & address;
-
-  size_t block_mask = 0LL;
   size_t offset = block_mask & address;
+  size_t setIndex = set_mask & (address >> cache->b);
+
+  size_t tag = address >> (cache->s + cache->b);
 
   set_probe_result_t probe_result = PROBE_MISS;
   int did_evict = 0;
@@ -212,6 +212,10 @@ void execute_operation_in_cache(
   case PROBE_HIT:
     *hit = 1;
     break;
+  }
+
+  if (operation == MODIFY) {
+    *hit += 1;
   }
 }
 
@@ -235,7 +239,7 @@ void break_down_cache(cache_t *cache) {
     break_down_set(&cache->sets[i]);
   }
 
-  free(cache->sets);
+  // free(cache->sets);
   free(cache);
 }
 
@@ -245,7 +249,7 @@ void break_down_cache(cache_t *cache) {
 
 typedef struct cache_simulator {
   // int e;          // associativity
-  int is_verbose; // 0 -> concise
+  bool is_verbose; // 0 -> concise
 
   unsigned int hits;
   unsigned int misses;
@@ -257,19 +261,22 @@ typedef struct cache_simulator {
 void get_address_and_mem_size(char *instruction, size_t *address,
                               size_t *size) {
   // split the instruction and load into address and size variables
+  instruction += 2;
   char *token = strtok(instruction, ",");
 
-  printf("%s", token);
-  *address = atoi(token);
+  *address = strtoul(token, NULL, 16);
+  // printf("%s\t", token);
+  // printf("%lx\t", *address);
 
   token = strtok(NULL, ",");
-  printf("%s", token);
-  *size = atoi(token);
+  *size = strtoul(token, NULL, 16);
+  // printf("%s\t", token);
+  // printf("%lx\t", *size);
 };
 
 void simulate_trace(cache_simulator_t *cache_simulator, char *instruction) {
   if (instruction[0] == ' ') {
-    *instruction += 1;
+    instruction += 0x1;
   }
   char op_char = instruction[0];
   operation_t operation = INSTRUCTION_LOAD;
@@ -298,7 +305,7 @@ void simulate_trace(cache_simulator_t *cache_simulator, char *instruction) {
                              &miss, &hit, &eviction);
 
   if (cache_simulator->is_verbose)
-    printf("%s %d %d %d", instruction, miss, hit, eviction);
+    printf("Verbose: %s %d %d %d\n", instruction, miss, hit, eviction);
 
   cache_simulator->misses += miss;
   cache_simulator->hits += hit;
@@ -306,7 +313,7 @@ void simulate_trace(cache_simulator_t *cache_simulator, char *instruction) {
 }
 
 cache_simulator_t *construct_cache_simulator(size_t s, size_t b, size_t e,
-                                             int is_verbose) {
+                                             bool is_verbose) {
   cache_simulator_t *cache_simulator = malloc(sizeof(cache_simulator_t));
 
   cache_simulator->misses = 0;
@@ -327,7 +334,7 @@ void break_down_cache_simulator(cache_simulator_t *cache_simulator) {
 
 int main(int argc, char *argv[]) {
   size_t s, b, e;
-  int is_verbose = 0;
+  bool is_verbose = false;
   char *trace_file = NULL;
 
   int opt;
@@ -343,7 +350,7 @@ int main(int argc, char *argv[]) {
       b = atoi(optarg);
       break;
     case 'v':
-      is_verbose = 1;
+      is_verbose = true;
       break;
     case 't':
       trace_file = optarg;
@@ -355,7 +362,9 @@ int main(int argc, char *argv[]) {
     }
   }
 
-  // cache_simulator_t *csim = construct_cache_simulator(s, b, e, is_verbose);
+  if (is_verbose)
+    printf("Debug mode: %d\n", is_verbose);
+  cache_simulator_t *csim = construct_cache_simulator(s, b, e, is_verbose);
 
   FILE *file = fopen(trace_file, "r");
 
@@ -368,14 +377,13 @@ int main(int argc, char *argv[]) {
   size_t len = 0;
   ssize_t read;
 
-  while ((read = getline(&line, &len, file)) != -1) {
-    printf("TRACE: %s", line);
-  }
+  while ((read = getline(&line, &len, file)) != -1)
+    simulate_trace(csim, line);
 
-  free(line);   // important: free buffer allocated by getline
-  fclose(file); // close the file
+  free(line);
+  fclose(file);
 
-  // printSummary(csim->hits, csim->misses, csim->evictions);
+  printSummary(csim->hits, csim->misses, csim->evictions);
   // break_down_cache_simulator(csim);
   return 0;
 }
