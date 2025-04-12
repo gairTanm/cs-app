@@ -13,6 +13,8 @@ A set is an array of lines
 A cache is an array of sets
 */
 
+unsigned long long global_time = 0;
+
 typedef enum set_probe_result {
   PROBE_HIT = 0,
   PROBE_MISS = 1
@@ -34,7 +36,7 @@ typedef struct block {
 void flush_and_fetch_new_block(block_t *block, size_t new_l,
                                size_t block_bits) {
   block->l = new_l;
-  block->r = new_l + (1 << (block_bits + 1));
+  block->r = new_l + (1 << (block_bits+1));
 }
 
 block_t *construct_block() {
@@ -55,21 +57,24 @@ typedef struct Line {
   int valid;
   size_t tag;
 
+  unsigned long long last_access_time;
   block_t *block;
 } line_t;
 
 line_t construct_line() {
-  line_t line = {.valid = 0, .tag = 0xFFFFFFFFFFF};
+  line_t line = {.valid = 0, .tag = 0};
   line.block = construct_block();
 
   return line;
 }
 
-int is_address_in_line(struct Line *line, size_t tag) {
+int is_address_in_line(struct Line *line, size_t tag, operation_t operation) {
   int isInLine = 0;
 
   if (line->valid && line->tag == tag)
     isInLine = 1;
+  if (isInLine /*&& operation == DATA_STORE*/)
+    line->last_access_time = ++global_time;
 
   return isInLine;
 }
@@ -78,6 +83,7 @@ void load_new_block_in_line(line_t *line, size_t tag, size_t address,
                             size_t block_bits) {
   line->tag = tag;
   line->valid = 1;
+  // line->last_access_time = ++global_time;
   flush_and_fetch_new_block(line->block, address, block_bits);
 }
 
@@ -123,14 +129,15 @@ void break_down_set(set_t *set) {
 }
 
 set_probe_result_t probe_set_for_memory(set_t *set, size_t tag,
-                                        size_t *hit_line) {
+                                        size_t *hit_line,
+                                        operation_t operation) {
   set_probe_result_t probeResult = PROBE_MISS;
 
   size_t line_count = set->line_count;
 
   for (size_t i = 0; i < line_count; i++) {
     struct Line *line = &set->lines[i];
-    if (is_address_in_line(line, tag)) {
+    if (is_address_in_line(line, tag, operation)) {
       probeResult = PROBE_HIT;
       *hit_line = i;
     }
@@ -144,7 +151,16 @@ void getblockFromSet(set_t *set) {} // NOTE: not required
 size_t line_to_evict(set_t *set) {
   // evict based on a cache eviction policy
   // printf("evicting %ld\n", set->line_count);
-  return 0;
+  size_t target_line = -1;
+  unsigned long long max_time = 0;
+  for (size_t i = 0; i < set->line_count; i++) {
+    line_t line = set->lines[i];
+    if (line.last_access_time >= max_time) {
+      max_time = line.last_access_time;
+      target_line = i;
+    }
+  }
+  return target_line;
 }
 
 int should_set_evict(set_t *set, size_t *line_to_load_into) {
@@ -161,9 +177,9 @@ int should_set_evict(set_t *set, size_t *line_to_load_into) {
 
 void handle_operation(set_t *set, size_t tag, size_t offset, size_t address,
                       size_t block_bits, enum set_probe_result *probe_result,
-                      int *did_evict) {
+                      operation_t operation, int *did_evict) {
   size_t hit_line = 0;
-  *probe_result = probe_set_for_memory(set, tag, &hit_line);
+  *probe_result = probe_set_for_memory(set, tag, &hit_line, operation);
 
   if (*probe_result == PROBE_MISS) {
     size_t line_to_load_into = -1;
@@ -202,7 +218,7 @@ void execute_operation_in_cache(
   set_probe_result_t probe_result = PROBE_MISS;
   int did_evict = 0;
   handle_operation(&cache->sets[setIndex], tag, offset, cache->b, address,
-                   &probe_result, &did_evict);
+                   &probe_result, operation, &did_evict);
   if (did_evict)
     *eviction = 1;
   switch (probe_result) {
@@ -260,18 +276,13 @@ typedef struct cache_simulator {
 
 void get_address_and_mem_size(char *instruction, size_t *address,
                               size_t *size) {
-  // split the instruction and load into address and size variables
   instruction += 2;
   char *token = strtok(instruction, ",");
 
   *address = strtoul(token, NULL, 16);
-  // printf("%s\t", token);
-  // printf("%lx\t", *address);
 
   token = strtok(NULL, ",");
   *size = strtoul(token, NULL, 16);
-  // printf("%s\t", token);
-  // printf("%lx\t", *size);
 };
 
 void simulate_trace(cache_simulator_t *cache_simulator, char *instruction) {
@@ -284,7 +295,7 @@ void simulate_trace(cache_simulator_t *cache_simulator, char *instruction) {
   switch (op_char) {
   case 'I':
     operation = INSTRUCTION_LOAD;
-    break;
+    return;
   case 'L':
     operation = DATA_LOAD;
     break;
@@ -301,8 +312,8 @@ void simulate_trace(cache_simulator_t *cache_simulator, char *instruction) {
   get_address_and_mem_size(instruction, &address, &size);
 
   unsigned int miss, hit, eviction = 0;
-  execute_operation_in_cache(cache_simulator->cache, operation, address, size,
-                             &miss, &hit, &eviction);
+    execute_operation_in_cache(cache_simulator->cache, operation, address, size,
+                               &miss, &hit, &eviction);
 
   if (cache_simulator->is_verbose)
     printf("Verbose: %s %d %d %d\n", instruction, miss, hit, eviction);
