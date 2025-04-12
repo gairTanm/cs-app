@@ -1,6 +1,7 @@
 #include "cachelab.h"
 #include <assert.h>
 #include <getopt.h>
+#include <limits.h>
 #include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -83,7 +84,6 @@ void load_new_block_in_line(line_t *line, size_t tag, size_t address,
                             size_t block_bits) {
   line->tag = tag;
   line->valid = 1;
-  // line->last_access_time = ++global_time;
   flush_and_fetch_new_block(line->block, address, block_bits);
 }
 
@@ -152,11 +152,11 @@ size_t line_to_evict(set_t *set) {
   // evict based on a cache eviction policy
   // printf("evicting %ld\n", set->line_count);
   size_t target_line = -1;
-  unsigned long long max_time = 0;
+  unsigned long long min_time = INT_MAX;
   for (size_t i = 0; i < set->line_count; i++) {
     line_t line = set->lines[i];
-    if (line.last_access_time >= max_time) {
-      max_time = line.last_access_time;
+    if (line.last_access_time <= min_time) {
+      min_time = line.last_access_time;
       target_line = i;
     }
   }
@@ -189,6 +189,7 @@ void handle_operation(set_t *set, size_t tag, size_t offset, size_t address,
     assert(line_to_load_into != -1);
     load_new_block_in_line(&set->lines[line_to_load_into], tag, address,
                            block_bits);
+    set->lines[line_to_load_into].last_access_time = ++global_time;
   }
 }
 
@@ -214,6 +215,8 @@ void execute_operation_in_cache(
   size_t setIndex = set_mask & (address >> cache->b);
 
   size_t tag = address >> (cache->s + cache->b);
+
+  printf("set: %lx tag: %lx offset: %lx  ", setIndex, tag, offset);
 
   set_probe_result_t probe_result = PROBE_MISS;
   int did_evict = 0;
