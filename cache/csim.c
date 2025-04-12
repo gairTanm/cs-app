@@ -1,5 +1,6 @@
 #include "cachelab.h"
 #include <assert.h>
+#include <getopt.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -141,6 +142,7 @@ void getblockFromSet(set_t *set) {} // NOTE: not required
 
 size_t line_to_evict(set_t *set) {
   // evict based on a cache eviction policy
+  printf("evicting %d\n", set->line_count);
   return 0;
 }
 
@@ -218,6 +220,8 @@ cache_t *construct_cache(size_t s, size_t b, size_t e) {
 
   size_t set_count = 1 << s;
   cache->sets = malloc(sizeof(set_t) * set_count);
+  cache->s = s;
+  cache->b = b;
 
   for (size_t i = 0; i < set_count; i++) {
     cache->sets[i] = construct_set(e);
@@ -322,9 +326,56 @@ void break_down_cache_simulator(cache_simulator_t *cache_simulator) {
 // Csim start
 
 int main(int argc, char *argv[]) {
-  int flags, opt;
-  int nsec, tfnd;
+  size_t s, b, e;
+  int is_verbose = 0;
+  char *trace_file = NULL;
 
-  printSummary(0, 0, 0);
+  int opt;
+  while ((opt = getopt(argc, argv, "s:E:b:vt:")) != -1) {
+    switch (opt) {
+    case 's':
+      s = atoi(optarg);
+      break;
+    case 'E':
+      e = atoi(optarg);
+      break;
+    case 'b':
+      b = atoi(optarg);
+      break;
+    case 'v':
+      is_verbose = 1;
+      break;
+    case 't':
+      trace_file = optarg;
+      break;
+    default:
+      fprintf(stderr, "Usage: %s -s <s> -E <E> -b <b> -t <tracefile> [-v]\n",
+              argv[0]);
+      exit(EXIT_FAILURE);
+    }
+  }
+
+  // cache_simulator_t *csim = construct_cache_simulator(s, b, e, is_verbose);
+
+  FILE *file = fopen(trace_file, "r");
+
+  if (!file) {
+    perror("failed to open trace file");
+    exit(EXIT_FAILURE);
+  }
+
+  char *line = NULL;
+  size_t len = 0;
+  ssize_t read;
+
+  while ((read = getline(&line, &len, file)) != -1) {
+    printf("TRACE: %s", line);
+  }
+
+  free(line);   // important: free buffer allocated by getline
+  fclose(file); // close the file
+
+  // printSummary(csim->hits, csim->misses, csim->evictions);
+  // break_down_cache_simulator(csim);
   return 0;
 }
