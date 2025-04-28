@@ -21,19 +21,38 @@ int is_transpose(int M, int N, int A[N][M], int B[M][N]);
  */
 char transpose_submit_desc[] = "Transpose submission";
 void transpose_submit(int M, int N, int A[N][M], int B[M][N]) {
-  int bsize = 8, bj, bi, i, j;
+  int bsize, bj, bi, i, j;
   // int tmp;
+  if (M == 64) {
+    bsize = 4;
+    for (bj = 0; bj < M; bj += bsize) {
+      for (bi = 0; bi < N; bi += bsize) {
+        for (i = bi; i < bi + bsize && i < N; i++) {
+          for (j = bj; j < bj + bsize && j < M; j++) {
+            // printf("swapping %d %d", i, j);
+            B[j][i] = A[i][j];
+            // else {
+            //   tmp = A[i][j];
+            //   B[i][j] = tmp;
+            // }
+          }
+        }
+      }
+    }
 
-  for (bj = 0; bj < M; bj += bsize) {
-    for (bi = 0; bi < N; bi += bsize) {
-      for (i = bi; i < bi + bsize && i < N; i++) {
-        for (j = bj; j < bj + bsize && j < M; j++) {
-          // printf("swapping %d %d", i, j);
-          B[j][i] = A[i][j];
-          // else {
-          //   tmp = A[i][j];
-          //   B[i][j] = tmp;
-          // }
+  } else {
+    bsize = 8;
+    for (bj = 0; bj < M; bj += bsize) {
+      for (bi = 0; bi < N; bi += bsize) {
+        for (i = bi; i < bi + bsize && i < N; i++) {
+          for (j = bj; j < bj + bsize && j < M; j++) {
+            // printf("swapping %d %d", i, j);
+            B[j][i] = A[i][j];
+            // else {
+            //   tmp = A[i][j];
+            //   B[i][j] = tmp;
+            // }
+          }
         }
       }
     }
@@ -111,12 +130,12 @@ void trans(int M, int N, int A[N][M], int B[M][N]) {
 void registerFunctions() {
 
   /* Register any additional transpose functions */
-  registerTransFunction(trans, trans_desc);
+  // registerTransFunction(trans, trans_desc);
 
   /* Register your solution function */
   registerTransFunction(transpose_submit, transpose_submit_desc);
-  registerTransFunction(transpose_submit_4, transpose_submit_4_desc);
-  registerTransFunction(transpose_submit_16, transpose_submit_16_desc);
+  // registerTransFunction(transpose_submit_4, transpose_submit_4_desc);
+  // registerTransFunction(transpose_submit_16, transpose_submit_16_desc);
 }
 
 /*
