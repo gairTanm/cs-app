@@ -22,36 +22,47 @@ int is_transpose(int M, int N, int A[N][M], int B[M][N]);
 char transpose_submit_desc[] = "Transpose submission";
 void transpose_submit(int M, int N, int A[N][M], int B[M][N]) {
   int bsize, bj, bi, i, j;
-  // int tmp;
+  int tmp, idx = -1;
   if (M == 64) {
     bsize = 4;
     for (bj = 0; bj < M; bj += bsize) {
       for (bi = 0; bi < N; bi += bsize) {
         for (i = bi; i < bi + bsize && i < N; i++) {
           for (j = bj; j < bj + bsize && j < M; j++) {
-            // printf("swapping %d %d", i, j);
-            B[j][i] = A[i][j];
-            // else {
-            //   tmp = A[i][j];
-            //   B[i][j] = tmp;
-            // }
+            if (i != j)
+              B[j][i] = A[i][j];
+            else {
+              tmp = A[i][j];
+              idx = i;
+            };
+          }
+          if (idx != -1) {
+            B[idx][idx] = tmp;
+            idx = -1;
           }
         }
       }
     }
-
   } else {
     bsize = 8;
     for (bj = 0; bj < M; bj += bsize) {
       for (bi = 0; bi < N; bi += bsize) {
         for (i = bi; i < bi + bsize && i < N; i++) {
           for (j = bj; j < bj + bsize && j < M; j++) {
-            // printf("swapping %d %d", i, j);
-            B[j][i] = A[i][j];
-            // else {
-            //   tmp = A[i][j];
-            //   B[i][j] = tmp;
-            // }
+            if (M == 32) {
+              if (i != j)
+                B[j][i] = A[i][j];
+              else {
+                tmp = A[i][j];
+                idx = i;
+              };
+            }else {
+              B[j][i] = A[i][j];
+            }
+          }
+          if (M == 32 && idx != -1) {
+            B[idx][idx] = tmp;
+            idx = -1;
           }
         }
       }
