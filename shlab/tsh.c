@@ -6,6 +6,7 @@
 #include <ctype.h>
 #include <errno.h>
 #include <signal.h>
+#include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -24,6 +25,17 @@
 #define FG 1    /* running in foreground */
 #define BG 2    /* running in background */
 #define ST 3    /* stopped */
+
+int debug = 0;
+
+void printdebug(const char *fmt, ...) {
+    if (!debug) return;
+    printf("Debug: ");
+    va_list args;
+    va_start(args, fmt);
+    vprintf(fmt, args);
+    va_end(args);
+}
 
 /*
  * Jobs states: FG (foreground), BG (background), ST (stopped)
@@ -141,6 +153,7 @@ int main(int argc, char **argv) {
             app_error("fgets error");
 
         /* Evaluate the command line */
+        printdebug("evaling: %s", cmdline);
         eval(cmdline);
         fflush(stdout);
         fflush(stdout);
@@ -161,25 +174,39 @@ int main(int argc, char **argv) {
  * when we type ctrl-c (ctrl-z) at the keyboard.
  */
 void eval(char *cmdline) {
-    printf("%s %lu\n", cmdline, strlen(cmdline));
+    // printdebug("%s %lu\n", cmdline, strlen(cmdline));
     char *env[] = {NULL};
     char *argv[MAXARGS];
     int is_bg = parseline(cmdline, argv);
-    printf("execing: %s\n", argv[0]);
+    printdebug("execing: %s\n", argv[0]);
+
+    if (argv[0] == NULL) return;
+
+    printdebug("is_bg: %d \n", is_bg);
+
     if (!builtin_cmd(&argv[0])) {
         // if it isn't a builtin command, fork-exec it
         pid_t pid = fork();
+        addjob(jobs, pid, BG, cmdline);
         if (pid == 0) {
-            execve(argv[0], argv, env);
-        } else {
+            if (execve(argv[0], argv, env) < 0) {
+                printf("%s: Command not found.\n", argv[0]);
+                exit(0);
+            }
+        };
+
+        // wait for the foreground job
+        if (!is_bg) {
             int status;
             pid_t child_pid = waitpid(pid, &status, 0);
 
-            if(WIFEXITED(status)) {
-                printf("Child process finished\n");
+            if (WIFEXITED(status)) {
+                deletejob(jobs, pid);
+                printdebug("Child process finished\n");
             }
+        } else {
+            printf("%d %s", pid, cmdline);
         }
-
     }
     return;
 }
@@ -243,17 +270,20 @@ int parseline(const char *cmdline, char **argv) {
  *    it immediately.
  */
 int builtin_cmd(char **argv) {
-    if (*argv == NULL) {
-    } else if (strcmp(*argv, "quit") == 0) {
-        printf("got a quit\n");
+    if (strcmp(*argv, "quit") == 0) {
+        printdebug("got a quit\n");
         exit(0);
     } else if (strncmp(*argv, "bg ", 3) == 0) {
-        printf("got a bg");
+        printdebug("got a bg\n");
     } else if (strncmp(*argv, "fg ", 3) == 0) {
+    } else if (strcmp(*argv, "jobs") == 0) {
+        printdebug("printing jobs: \n");
+        listjobs(jobs);
     } else {
-        return 0;
+        printdebug("Not a builtin command\n", *argv);
+        return 0; /* not a builtin command */
     }
-    return 1; /* not a builtin command */
+    return 1;
 }
 
 /*
@@ -277,7 +307,19 @@ void waitfg(pid_t pid) { return; }
  *     available zombie children, but doesn't wait for any other
  *     currently running children to terminate.
  */
-void sigchld_handler(int sig) { return; }
+void sigchld_handler(int sig) {
+    // return;
+    int status;
+    pid_t pid;
+    while ((pid = waitpid(-1, &status, WNOHANG)) > 0) {
+        deletejob(jobs, pid);
+        printdebug("Reaped child with PID: %d\n", pid);
+    }
+
+    fflush(stdout);
+    // if WIFEXITED (status) {
+    // }
+}
 
 /*
  * sigint_handler - The kernel sends a SIGINT to the shell whenver the
@@ -328,7 +370,7 @@ int maxjid(struct job_t *jobs) {
 /* addjob - Add a job to the job list */
 int addjob(struct job_t *jobs, pid_t pid, int state, char *cmdline) {
     int i;
-
+    printdebug("adding job: %d", pid);
     if (pid < 1) return 0;
 
     for (i = 0; i < MAXJOBS; i++) {
