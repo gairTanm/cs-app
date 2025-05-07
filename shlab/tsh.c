@@ -26,7 +26,7 @@
 #define BG 2    /* running in background */
 #define ST 3    /* stopped */
 
-int debug = 0;
+int debug = 1;
 
 void printdebug(const char *fmt, ...) {
     if (!debug) return;
@@ -187,8 +187,12 @@ void eval(char *cmdline) {
     if (!builtin_cmd(&argv[0])) {
         // if it isn't a builtin command, fork-exec it
         pid_t pid = fork();
-        addjob(jobs, pid, BG, cmdline);
+        addjob(jobs, pid, is_bg ? BG : FG, cmdline);
         if (pid == 0) {
+            if (setpgid(0, 0) < 0) {
+                printf("setpgid error\n");
+                exit(1);
+            };
             if (execve(argv[0], argv, env) < 0) {
                 printf("%s: Command not found.\n", argv[0]);
                 exit(0);
@@ -309,16 +313,20 @@ void waitfg(pid_t pid) { return; }
  */
 void sigchld_handler(int sig) {
     // return;
+    sigset_t mask_all, prev_all;
     int status;
     pid_t pid;
+
+    sigfillset(&mask_all);
     while ((pid = waitpid(-1, &status, WNOHANG)) > 0) {
+        sigprocmask(SIG_BLOCK, &mask_all, &prev_all);
         deletejob(jobs, pid);
-        printdebug("Reaped child with PID: %d\n", pid);
+        sigprocmask(SIG_SETMASK, &prev_all, NULL);
     }
+    // if (errno != ECHILD) {
+    // }
 
     fflush(stdout);
-    // if WIFEXITED (status) {
-    // }
 }
 
 /*
@@ -326,7 +334,18 @@ void sigchld_handler(int sig) {
  *    user types ctrl-c at the keyboard.  Catch it and send it along
  *    to the foreground job.
  */
-void sigint_handler(int sig) { return; }
+void sigint_handler(int sig) {
+    sigset_t mask_all, prev_all;
+    int status;
+    pid_t pid = fgpid(jobs);
+
+    printdebug("Stopping (SIGINT) child with PID: %d\n", pid);
+    killpg(pid, SIGTERM);
+    sigfillset(&mask_all);
+    deletejob(jobs, pid);
+    sigprocmask(SIG_SETMASK, &prev_all, NULL);
+    fflush(stdout);
+}
 
 /*
  * sigtstp_handler - The kernel sends a SIGTSTP to the shell whenever
@@ -370,7 +389,7 @@ int maxjid(struct job_t *jobs) {
 /* addjob - Add a job to the job list */
 int addjob(struct job_t *jobs, pid_t pid, int state, char *cmdline) {
     int i;
-    printdebug("adding job: %d", pid);
+    printdebug("adding job: %d\n", pid);
     if (pid < 1) return 0;
 
     for (i = 0; i < MAXJOBS; i++) {
