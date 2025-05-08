@@ -202,13 +202,7 @@ void eval(char *cmdline) {
 
         // wait for the foreground job
         if (!is_bg) {
-            int status;
-            pid_t child_pid = waitpid(pid, &status, WUNTRACED);
-
-            if (WIFEXITED(status)) {
-                deletejob(jobs, pid);
-                printdebug("Child process finished\n");
-            }
+            waitfg(pid);
         } else {
             printf("%d %s", pid, cmdline);
         }
@@ -276,12 +270,10 @@ int parseline(const char *cmdline, char **argv) {
  */
 int builtin_cmd(char **argv) {
     if (strcmp(*argv, "quit") == 0) {
-        printdebug("got a quit\n");
         exit(0);
     } else if (strncmp(*argv, "bg", 2) == 0 || strncmp(*argv, "fg", 2) == 0) {
         do_bgfg(argv);
     } else if (strcmp(*argv, "jobs") == 0) {
-        printdebug("printing jobs: \n");
         listjobs(jobs);
     } else {
         printdebug("Not a builtin command\n", *argv);
@@ -290,7 +282,7 @@ int builtin_cmd(char **argv) {
     return 1;
 }
 
-struct job_t * get_job(unsigned int jid_or_pid) {
+struct job_t *get_job(unsigned int jid_or_pid) {
     // printdebug("jobid %s %d\n", argv[1], jid);
     struct job_t *target_job = getjobjid(jobs, jid_or_pid);
     if (target_job != NULL) {
@@ -310,26 +302,36 @@ struct job_t * get_job(unsigned int jid_or_pid) {
  */
 void do_bgfg(char **argv) {
     unsigned int jid_or_pid = atoi(argv[1]);
-    struct job_t * target_job;
+    struct job_t *target_job;
     if ((target_job = get_job(jid_or_pid)) == NULL) {
         printf("Job not found\n");
         return;
     }
+
+    kill(-target_job->pid, SIGCONT);
     if (strncmp(*argv, "bg", 2) == 0) {
-        printdebug("got a bg\n");
         kill(-target_job->pid, SIGCONT);
         target_job->state = BG;
-        printf("[%d] (%d) %d %s\n", target_job->jid, target_job->pid, target_job->state,
-               target_job->cmdline);
+        printf("[%d] (%d) %d %s\n", target_job->jid, target_job->pid,
+               target_job->state, target_job->cmdline);
     } else {
-        printdebug("got a bg\n");
+        target_job->state = FG;
+        waitfg(target_job->pid);
     }
 }
 
 /*
  * waitfg - Block until process pid is no longer the foreground process
  */
-void waitfg(pid_t pid) { return; }
+void waitfg(pid_t pid) {
+    int status;
+    pid_t child_pid = waitpid(pid, &status, WUNTRACED);
+
+    if (WIFEXITED(status)) {
+        deletejob(jobs, pid);
+        printdebug("Child process finished\n");
+    }
+}
 
 /*****************
  * Signal handlers
@@ -387,7 +389,7 @@ void sigtstp_handler(int sig) {
     sigset_t mask_all, prev_all;
     int status;
     pid_t pid = fgpid(jobs);
-    if (pid == 0) exit(0);
+    if (pid == 0) return;
 
     printdebug("Sending SIGTSTP(%d) child with PID: %d\n", sig, pid);
     kill(-pid, SIGTSTP);
