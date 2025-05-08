@@ -26,7 +26,7 @@
 #define BG 2    /* running in background */
 #define ST 3    /* stopped */
 
-int debug = 1;
+int debug = 0;
 
 void printdebug(const char *fmt, ...) {
     if (!debug) return;
@@ -282,29 +282,40 @@ int builtin_cmd(char **argv) {
     return 1;
 }
 
-struct job_t *get_job(unsigned int jid_or_pid) {
-    // printdebug("jobid %s %d\n", argv[1], jid);
-    struct job_t *target_job = getjobjid(jobs, jid_or_pid);
-    if (target_job != NULL) {
-        printdebug("JobID [%d] found \n", target_job->jid);
-        return target_job;
+struct job_t *get_job(unsigned int jid_or_pid, int is_pid) {
+    // printf("jobid %d\n", jid_or_pid);
+    struct job_t *target_job = NULL;
+    if (!is_pid) {
+        if ((target_job = getjobjid(jobs, jid_or_pid)) == NULL) {
+            printf("%%%d: no such job\n", jid_or_pid);
+        }
+    } else {
+        ;
+        if ((target_job = getjobpid(jobs, jid_or_pid)) == NULL) {
+            printf("(%d): no such process\n", jid_or_pid);
+        }
     }
-    target_job = getjobpid(jobs, jid_or_pid);
-    if (target_job != NULL) {
-        printdebug("ProcessID [%d] found \n", jid_or_pid);
-        return target_job;
-    }
-    return 0;
+    return target_job;
 }
 
 /*
  * do_bgfg - Execute the builtin bg and fg commands
  */
 void do_bgfg(char **argv) {
-    unsigned int jid_or_pid = atoi(argv[1]);
+    unsigned int jid_or_pid;
+    int is_pid = 0;
+    if (argv[1] == NULL) {
+        printf("Please provide an arg for bg/fg\n");
+        return;
+    }
+    if (argv[1][0] == '%')
+        jid_or_pid = atoi(argv[1] + 1);
+    else {
+        is_pid = 1;
+        jid_or_pid = atoi(argv[1]);
+    }
     struct job_t *target_job;
-    if ((target_job = get_job(jid_or_pid)) == NULL) {
-        printf("Job not found\n");
+    if ((target_job = get_job(jid_or_pid, is_pid)) == NULL) {
         return;
     }
 
@@ -372,7 +383,7 @@ void sigint_handler(int sig) {
     int status;
     pid_t pid = fgpid(jobs);
 
-    printdebug("Stopping (SIGINT) child with PID: %d\n", pid);
+    printf("Stopping (SIGINT) child with PID: %d\n", pid);
     kill(-pid, SIGTERM);
     sigfillset(&mask_all);
     deletejob(jobs, pid);
@@ -391,7 +402,7 @@ void sigtstp_handler(int sig) {
     pid_t pid = fgpid(jobs);
     if (pid == 0) return;
 
-    printdebug("Sending SIGTSTP(%d) child with PID: %d\n", sig, pid);
+    printf("Sending SIGTSTP(%d) child with PID: %d\n", sig, pid);
     kill(-pid, SIGTSTP);
     sigfillset(&mask_all);
     stopjob(jobs, pid);
