@@ -17,7 +17,7 @@
 /* Misc manifest constants */
 #define MAXLINE 1024   /* max line size */
 #define MAXARGS 128    /* max args on a command line */
-#define MAXJOBS 16     /* max jobs at any point in time */
+#define MAXJOBS 16      /* max jobs at any point in time */
 #define MAXJID 1 << 16 /* max job ID */
 
 /* Job states */
@@ -53,6 +53,7 @@ char prompt[] = "tsh> "; /* command line prompt (DO NOT CHANGE) */
 int verbose = 0;         /* if true, print additional output */
 int nextjid = 1;         /* next job ID to allocate */
 char sbuf[MAXLINE];      /* for composing sprintf messages */
+int job_count = 0;
 
 struct job_t {             /* The job struct */
     pid_t pid;             /* job PID */
@@ -139,6 +140,7 @@ int main(int argc, char **argv) {
     /* Initialize the job list */
     initjobs(jobs);
 
+    fflush(stdout);
     /* Execute the shell's read/eval loop */
     while (1) {
         /* Read command line */
@@ -157,7 +159,7 @@ int main(int argc, char **argv) {
         printdebug("evaling: %s", cmdline);
         eval(cmdline);
         fflush(stdout);
-        // fflush(stdout);
+        fflush(stdout);
     }
 
     exit(0); /* control never reaches here */
@@ -182,17 +184,29 @@ void eval(char *cmdline) {
 
     if (argv[0] == NULL) return;
     sigset_t mask_all, prev_all;
-    // pid_t child_pid = waitpid(pid, &status, WUNTRACED);
 
     sigfillset(&mask_all);
 
     if (!builtin_cmd(&argv[0])) {
         // if it isn't a builtin command, fork-exec it
+
+        /* Job Overflow
+         * Check for job overflows
+         */
+        if (job_count >= MAXJOBS) {
+            printf(
+                "Shell is handling too many jobs at the moment, only builtin "
+                "commands are available\n");
+            return;
+        }
+
         sigprocmask(SIG_BLOCK, &mask_all, &prev_all);
         pid_t pid = fork();
-        if (pid != 0) addjob(jobs, pid, is_bg ? BG : FG, cmdline);
-        sigprocmask(SIG_SETMASK, &prev_all, NULL);
+
+        job_count += addjob(jobs, pid, is_bg ? BG : FG, cmdline);
+        printdebug("job count: %d\n", job_count);
         if (pid == 0) {
+            sigprocmask(SIG_SETMASK, &prev_all, NULL);
             if (setpgid(0, 0) < 0) {
                 printf("setpgid error\n");
                 exit(1);
@@ -343,11 +357,10 @@ void waitfg(pid_t pid, int status, int direct_fg) {
     }
     if (WSTOPSIG(status)) {
         // kill(getpid(), SIGTSTP);
-        printf("Sending SIGTSTP child with PID: %d\n",  pid);
+        printf("Sending SIGTSTP child with PID: %d\n", pid);
         stopjob(jobs, pid);
     } else if (WTERMSIG(status)) {
         printf("Stopping (SIGINT) child with PID: %d\n", pid);
-
         deletejob(jobs, pid);
     } else if (WIFEXITED(status)) {
         deletejob(jobs, pid);
@@ -373,14 +386,15 @@ void sigchld_handler(int sig) {
         printdebug("Got a SIGCHLD for ");
         printdebug("pid: (%d)\n", pid);
         if (WSTOPSIG(status)) {
-            printdebug("sigtstp\n");
-            kill(getpid(), SIGTSTP);
+            // printdebug("sigtstp\n");
+            // kill(getpid(), SIGTSTP);
         } else if (WTERMSIG(status)) {
-            printdebug("sigint\n");
-            sigint_handler(sig);
+            // printdebug("sigint\n");
+            // sigint_handler(sig);
         } else {
             waitfg(pid, status, 0);
         }
+        job_count -= 1;
     }
 }
 
