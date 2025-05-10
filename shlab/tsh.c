@@ -17,7 +17,7 @@
 /* Misc manifest constants */
 #define MAXLINE 1024   /* max line size */
 #define MAXARGS 128    /* max args on a command line */
-#define MAXJOBS 16      /* max jobs at any point in time */
+#define MAXJOBS 16     /* max jobs at any point in time */
 #define MAXJID 1 << 16 /* max job ID */
 
 /* Job states */
@@ -76,7 +76,7 @@ void sigchld_handler(int sig);
 void sigtstp_handler(int sig);
 void sigint_handler(int sig);
 
-void stopjob(struct job_t *jobs, pid_t pid);
+int stopjob(struct job_t *jobs, pid_t pid);
 /* Here are helper routines that we've provided for you */
 int parseline(const char *cmdline, char **argv);
 void sigquit_handler(int sig);
@@ -346,6 +346,17 @@ void do_bgfg(char **argv) {
     }
 }
 
+typedef int (*manip_jobs_t)(struct job_t *, int);
+void modify_jobs_safely(manip_jobs_t manip_jobs, int pid) {
+    sigset_t mask, prev_mask;
+
+    sigfillset(&mask);
+
+    sigprocmask(SIG_SETMASK, &mask, &prev_mask);
+    (*manip_jobs)(jobs, pid);
+    sigprocmask(SIG_SETMASK, &prev_mask, NULL);
+}
+
 /*
  * waitfg - Block until process pid is no longer the foreground process
  */
@@ -356,14 +367,13 @@ void waitfg(pid_t pid, int status, int direct_fg) {
         pid_t child_pid = waitpid(pid, &status, WUNTRACED);
     }
     if (WSTOPSIG(status)) {
-        // kill(getpid(), SIGTSTP);
         printf("Sending SIGTSTP child with PID: %d\n", pid);
-        stopjob(jobs, pid);
+        modify_jobs_safely(&stopjob, pid);
     } else if (WTERMSIG(status)) {
         printf("Stopping (SIGINT) child with PID: %d\n", pid);
-        deletejob(jobs, pid);
+        modify_jobs_safely(&deletejob, pid);
     } else if (WIFEXITED(status)) {
-        deletejob(jobs, pid);
+        modify_jobs_safely(&deletejob, pid);
         printdebug("Child process finished\n");
     }
 }
@@ -409,10 +419,6 @@ void sigint_handler(int sig) {
     pid_t pid = fgpid(jobs);
 
     kill(-pid, SIGTERM);
-    // sigfillset(&mask_all);
-    // deletejob(jobs, pid);
-    // sigprocmask(SIG_SETMASK, &prev_all, NULL);
-    // fflush(stdout);
 }
 
 /*
@@ -427,20 +433,17 @@ void sigtstp_handler(int sig) {
     if (pid == 0) return;
 
     kill(-pid, SIGTSTP);
-    // sigfillset(&mask_all);
-    // stopjob(jobs, pid);
-    // sigprocmask(SIG_SETMASK, &prev_all, NULL);
-    // fflush(stdout);
 }
 
-void stopjob(struct job_t *jobs, pid_t pid) {
+int stopjob(struct job_t *jobs, pid_t pid) {
     for (int i = 0; i < MAXJOBS; i++) {
         if (jobs[i].pid == pid) {
             jobs[i].state = ST;
             printdebug("Stopped job: %d\n", pid);
-            return;
+            return 1;
         }
     }
+    return 0;
 }
 
 /*********************
