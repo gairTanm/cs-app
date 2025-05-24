@@ -6,8 +6,7 @@
  * footers.  Blocks are never coalesced or reused. Realloc is
  * implemented directly using mm_malloc and mm_free.
  *
- * NOTE TO STUDENTS: Replace this header comment with your own header
- * comment that gives a high level description of your solution.
+ * Seglist explicit ll implementation
  */
 #include "mm.h"
 
@@ -62,13 +61,30 @@ team_t team = {
 #define FTRP(bp) ((char *)(bp) + GET_SIZE(HDRP(bp)) - DSIZE)
 
 #define NEXT_BLCKP(bp) ((char *)(bp) + ((GET_SIZE(HDRP(bp)))))
-#define PREV_BLCKP(bp) ((char *)(bp) - ((GET_SIZE(HDRP(bp) - (WSIZE)))))
+#define PREV_BLCKP(bp) ((char *)(bp) - GET_SIZE((char *)(bp) - DSIZE))
 
 #define PACK(val, alloc) (val | alloc)
 
 #define MAX(x, y) ((x) > (y) ? (x) : (y))
 
 static char *heap_listp;
+
+/***************************************************
+ * SegList wrapper Implementation
+ ***************************************************/
+
+#define SEG_MAX 14 // 1<<14 max
+
+static void *seglist_start[SEG_MAX];
+
+/* Given a free block size, get the index of the seglist it belongs to*/
+int get_index(size_t fbsize) {
+  // hello
+  if (fbsize == 0)
+    return -1;
+  int idx = 63 - __builtin_clzll(fbsize);
+  return idx >= SEG_MAX ? SEG_MAX - 1 : idx;
+}
 
 /***************************************************
  * ELL Implementation
@@ -79,7 +95,7 @@ static char *heap_listp;
 #define PREV_FBLK(bp) (*(char **)(bp))
 #define NEXT_FBLK(bp) (*(char **)((char *)(bp) + WSIZE))
 
-static char *_ell_start = NULL;
+// static char *_ell_start;
 // static char *_ell_end;
 /* Insert a free block naively at the start (maybe do the address ordering
  * later) */
@@ -91,26 +107,29 @@ void insert_free_block(void *bp) {
   start = bp;
   */
 
-  NEXT_FBLK(bp) = _ell_start;
+  int index = get_index(GET_SIZE(HDRP(bp)));
+
+  //   printf("size: %d index: %d\n", GET_SIZE(HDRP(bp)), index);
+  NEXT_FBLK(bp) = seglist_start[index];
   PREV_FBLK(bp) = NULL;
 
-  if (_ell_start != NULL && _ell_start != 0x0)
-    PREV_FBLK(_ell_start) = bp;
+  if (seglist_start[index] != NULL && seglist_start[index] != 0x0)
+    PREV_FBLK(seglist_start[index]) = bp;
 
-  _ell_start = bp;
+  seglist_start[index] = bp;
 }
 
 /* Given that a block has been allocated, remove it from the list */
-void remove_allocated_block(void *bp) {
+void remove_free_block(void *bp) {
   /*
   bp->prev->next = bp->next;
   bp->next = prev_start;
   */
-  //   printf("freeing 0x%x\n", bp);
   if (PREV_FBLK(bp))
     NEXT_FBLK(PREV_FBLK(bp)) = NEXT_FBLK(bp);
   else
-    _ell_start = NEXT_FBLK(bp); // In case bp is the start block
+    seglist_start[get_index(GET_SIZE(HDRP(bp)))] =
+        NEXT_FBLK(bp); // In case bp is the start block
 
   if (NEXT_FBLK(bp))
     PREV_FBLK(NEXT_FBLK(bp)) = PREV_FBLK(bp);
@@ -119,34 +138,35 @@ void remove_allocated_block(void *bp) {
 }
 
 void mm_check() {
-  char *bp = _ell_start;
-  int count = 0;
+  //   char *bp = seglist_start[get_index(GET_SIZE(HDRP(bp)))];
+  //   int count = 0;
 
-  while (bp != NULL) {
-    if (count++ > 10000) {
-      printf("Cycle detected in free list!\n");
-      exit(1);
-    }
+  //   while (bp != NULL) {
+  //     if (count++ > 10000) {
+  //       printf("Cycle detected in free list!\n");
+  //       exit(1);
+  //     }
 
-    size_t size = GET_SIZE(HDRP(bp));
-    if (size == 0 || size % 8 != 0) {
-      printf("Corrupted block in free list!\n");
-      exit(1);
-    }
+  //     size_t size = GET_SIZE(HDRP(bp));
+  //     if (size == 0 || size % 8 != 0) {
+  //       printf("Corrupted block in free list!\n");
+  //       exit(1);
+  //     }
 
-    bp = NEXT_FBLK(bp);
-  }
+  //     bp = NEXT_FBLK(bp);
+  //   }
 }
 
 void *find_fit_ll(size_t asize) {
   //   unsigned int *start = (unsigned int *)_ell_start;
   void *bp;
-
-  for (bp = _ell_start; (bp != 0x0) && (bp != NULL);) {
-    if (GET_SIZE(HDRP(bp)) >= asize) {
-      return bp;
-    };
-    bp = NEXT_FBLK(bp);
+  for (int i = get_index(asize); i < SEG_MAX; i++) {
+    for (bp = seglist_start[i]; (bp != 0x0) && (bp != NULL);) {
+      if (GET_SIZE(HDRP(bp)) >= asize) {
+        return bp;
+      };
+      bp = NEXT_FBLK(bp);
+    }
   }
 
   return NULL;
@@ -177,7 +197,8 @@ int mm_init(void) {
   PUT(heap_listp + (WSIZE * 3), PACK(0, 1));
   heap_listp += (2 * WSIZE);
 
-  _ell_start = NULL;
+  for (int i = 0; i < SEG_MAX; i++)
+    seglist_start[i] = NULL;
 
   if (extend_heap(CHUNKSIZE / WSIZE) == NULL) {
     return -1;
@@ -225,14 +246,16 @@ void *mm_malloc(size_t size) {
   if (size < 2 * DSIZE) {
     asize = 2 * DSIZE;
   } else {
-    asize = ALIGN(size + SIZE_T_SIZE);
+    asize = DSIZE * ((size + (DSIZE) + (DSIZE - 1)) / DSIZE);
   }
 
   if ((bp = find_fit_ll(asize)) != NULL) {
     place(bp, asize);
     return bp;
   }
-  if ((bp = extend_heap(MAX(asize, CHUNKSIZE) / WSIZE)) == NULL)
+
+  size_t extendsize = MAX(asize, CHUNKSIZE);
+  if ((bp = extend_heap(extendsize / WSIZE)) == NULL)
     return NULL;
   place(bp, asize);
 
@@ -245,7 +268,7 @@ void place(void *bp, size_t asize) {
   size_t curr_size = GET_SIZE(HDRP(bp));
 
   // remove from the ELL
-  remove_allocated_block(bp);
+  remove_free_block(bp);
 
   // standard placement logic
   if ((curr_size - asize) >= MIN_SIZE) {
@@ -299,7 +322,7 @@ static void *coalesce(void *bp) {
   }
 
   else if (!prev_allocated && next_allocated) {
-    remove_allocated_block(prev);
+    remove_free_block(prev);
     curr_size += GET_SIZE(HDRP(prev));
 
     PUT(HDRP(prev), PACK(curr_size, !ALLOCATED));
@@ -308,7 +331,7 @@ static void *coalesce(void *bp) {
   }
 
   else if (prev_allocated && !next_allocated) {
-    remove_allocated_block(next);
+    remove_free_block(next);
     curr_size += GET_SIZE(HDRP(next));
 
     PUT(FTRP(next), PACK(curr_size, !ALLOCATED));
@@ -318,8 +341,8 @@ static void *coalesce(void *bp) {
   else {
     curr_size += GET_SIZE(HDRP(next)) + GET_SIZE(HDRP(prev));
 
-    remove_allocated_block(prev);
-    remove_allocated_block(next);
+    remove_free_block(prev);
+    remove_free_block(next);
     PUT(HDRP(prev), PACK(curr_size, !ALLOCATED));
     PUT(FTRP(next), PACK(curr_size, !ALLOCATED));
 
@@ -342,10 +365,16 @@ void *mm_realloc(void *ptr, size_t size) {
   newptr = mm_malloc(size);
   if (newptr == NULL)
     return NULL;
-  copySize = *(size_t *)((char *)oldptr - SIZE_T_SIZE);
+  size_t old_size =
+      GET_SIZE(HDRP(oldptr)); // block size including header/footer
+  copySize = old_size -
+             2 * SIZE_T_SIZE; // subtract header + footer to get payload size
+
   if (size < copySize)
     copySize = size;
+
   memcpy(newptr, oldptr, copySize);
+
   mm_free(oldptr);
   return newptr;
 }
