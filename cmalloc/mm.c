@@ -61,8 +61,8 @@ team_t team = {
 #define HDRP(bp) ((char *)(bp) - WSIZE)
 #define FTRP(bp) ((char *)(bp) + GET_SIZE(HDRP(bp)) - DSIZE)
 
-#define NEXT_BLCKP(bp) (char *)(bp) + ((GET_SIZE(HDRP(bp))))
-#define PREV_BLCKP(bp) (char *)(bp) - ((GET_SIZE(HDRP(bp) - (WSIZE))))
+#define NEXT_BLCKP(bp) ((char *)(bp) + ((GET_SIZE(HDRP(bp)))))
+#define PREV_BLCKP(bp) ((char *)(bp) - ((GET_SIZE(HDRP(bp) - (WSIZE)))))
 
 #define PACK(val, alloc) (val | alloc)
 
@@ -74,46 +74,86 @@ static char *heap_listp;
  * ELL Implementation
  ***************************************************/
 
-#define LIST_MASK ~0x0
+// #define LIST_MASK ~0x0
 
-#define GET_PREV_FBLK(bp) (*(unsigned int *)(bp) & (LIST_MASK))
-#define GET_NEXT_FBLK(bp) (*(unsigned int *)(bp + LIST_MASK) & (LIST_MASK))
+#define PREV_FBLK(bp) (*(char **)(bp))
+#define NEXT_FBLK(bp) (*(char **)((char *)(bp) + WSIZE))
 
-static char *_ell_start;
-static char *_ell_end;
-/* Insert a free block naively at the start */
-void *insert_free_block(void *bp) {
-  unsigned int *prev_start = (unsigned int *)_ell_start;
-
+static char *_ell_start = NULL;
+// static char *_ell_end;
+/* Insert a free block naively at the start (maybe do the address ordering
+ * later) */
+void insert_free_block(void *bp) {
   /*
   prev_start -> prev = bp;
   bp->prev = null;
   bp->next = prev_start;
+  start = bp;
   */
 
-  return bp;
+  NEXT_FBLK(bp) = _ell_start;
+  PREV_FBLK(bp) = NULL;
+
+  if (_ell_start != NULL && _ell_start != 0x0)
+    PREV_FBLK(_ell_start) = bp;
+
+  _ell_start = bp;
 }
 
 /* Given that a block has been allocated, remove it from the list */
-void *remove_allocated_block(void *bp) {
-  unsigned int *prev_start = (unsigned int *)_ell_start;
-
+void remove_allocated_block(void *bp) {
   /*
-  bp->prev->next = bp->next->;
+  bp->prev->next = bp->next;
   bp->next = prev_start;
   */
+  //   printf("freeing 0x%x\n", bp);
+  if (PREV_FBLK(bp))
+    NEXT_FBLK(PREV_FBLK(bp)) = NEXT_FBLK(bp);
+  else
+    _ell_start = NEXT_FBLK(bp); // In case bp is the start block
 
-  return bp;
+  if (NEXT_FBLK(bp))
+    PREV_FBLK(NEXT_FBLK(bp)) = PREV_FBLK(bp);
+
+  NEXT_FBLK(bp) = PREV_FBLK(bp) = NULL;
+}
+
+void mm_check() {
+  char *bp = _ell_start;
+  int count = 0;
+
+  while (bp != NULL) {
+    if (count++ > 10000) {
+      printf("Cycle detected in free list!\n");
+      exit(1);
+    }
+
+    size_t size = GET_SIZE(HDRP(bp));
+    if (size == 0 || size % 8 != 0) {
+      printf("Corrupted block in free list!\n");
+      exit(1);
+    }
+
+    bp = NEXT_FBLK(bp);
+  }
 }
 
 void *find_fit_ll(size_t asize) {
-  unsigned int *start = (unsigned int *)_ell_start;
+  //   unsigned int *start = (unsigned int *)_ell_start;
 
   /*
   for (start = _ell_start; start != _ell_end; start = start->next) {
     if (!get_alloc(bp) && GET_SIZE(bp) >= asize)return start;
   }
   */
+  void *bp;
+
+  for (bp = _ell_start; (bp != 0x0) && (bp != NULL);) {
+    if (GET_SIZE(HDRP(bp)) >= asize) {
+      return bp;
+    };
+    bp = NEXT_FBLK(bp);
+  }
 
   return NULL;
 }
@@ -124,7 +164,7 @@ void *find_fit_ll(size_t asize) {
 
 static void *find_fit(size_t asize);
 static void *extend_heap(size_t words);
-static void *place(void *bp, size_t asize);
+static void place(void *bp, size_t asize);
 static void *coalesce(void *bp);
 
 /*
@@ -143,11 +183,7 @@ int mm_init(void) {
   PUT(heap_listp + (WSIZE * 3), PACK(0, 1));
   heap_listp += (2 * WSIZE);
 
-  // TODO: initialise list start and list end
-  // start -> bp
-  // end -> bp
-
-  //   _ell_start = _ell_end = bp;
+  _ell_start = NULL;
 
   if (extend_heap(CHUNKSIZE / WSIZE) == NULL) {
     return -1;
@@ -198,31 +234,38 @@ void *mm_malloc(size_t size) {
     asize = ALIGN(size + SIZE_T_SIZE);
   }
 
-  if ((bp = find_fit(asize)) != NULL) {
+  if ((bp = find_fit_ll(asize)) != NULL) {
     place(bp, asize);
     return bp;
   }
   if ((bp = extend_heap(MAX(asize, CHUNKSIZE) / WSIZE)) == NULL)
     return NULL;
   place(bp, asize);
+
+  //   mm_check();
+
   return bp;
 }
 
-static void *place(void *bp, size_t asize) {
+void place(void *bp, size_t asize) {
   size_t curr_size = GET_SIZE(HDRP(bp));
 
+  // remove from the ELL
+  remove_allocated_block(bp);
+
+  // standard placement logic
   if ((curr_size - asize) >= MIN_SIZE) {
     PUT(HDRP(bp), PACK(asize, ALLOCATED));
     PUT(FTRP(bp), PACK(asize, ALLOCATED));
     bp = NEXT_BLCKP(bp);
     PUT(HDRP(bp), PACK((curr_size - asize), !ALLOCATED));
     PUT(FTRP(bp), PACK((curr_size - asize), !ALLOCATED));
+
+    insert_free_block(bp);
   } else {
     PUT(HDRP(bp), PACK(curr_size, ALLOCATED));
     PUT(FTRP(bp), PACK(curr_size, ALLOCATED));
   }
-
-  return bp;
 }
 
 static void *find_fit(size_t asize) {
@@ -241,10 +284,13 @@ static void *find_fit(size_t asize) {
  */
 void mm_free(void *ptr) {
   size_t _size = GET_SIZE(HDRP(ptr));
+
   PUT(HDRP(ptr), PACK(_size, !ALLOCATED));
   PUT(FTRP(ptr), PACK(_size, !ALLOCATED));
 
   coalesce(ptr);
+
+  //   mm_check();
 }
 
 static void *coalesce(void *bp) {
@@ -252,35 +298,42 @@ static void *coalesce(void *bp) {
   int next_allocated = GET_ALLOC(HDRP(NEXT_BLCKP(bp)));
 
   size_t curr_size = GET_SIZE(HDRP(bp));
+  void *prev = PREV_BLCKP(bp);
+  void *next = NEXT_BLCKP(bp);
 
-  if (prev_allocated && next_allocated)
-    return bp;
+  if (prev_allocated && next_allocated) {
+  }
 
   else if (!prev_allocated && next_allocated) {
-    curr_size += GET_SIZE(HDRP(PREV_BLCKP(bp)));
+    remove_allocated_block(prev);
+    curr_size += GET_SIZE(HDRP(prev));
 
-    PUT(HDRP(PREV_BLCKP(bp)), PACK(curr_size, !ALLOCATED));
+    PUT(HDRP(prev), PACK(curr_size, !ALLOCATED));
     PUT(FTRP(bp), PACK(curr_size, !ALLOCATED));
-    bp = PREV_BLCKP(bp);
+    bp = prev;
   }
 
   else if (prev_allocated && !next_allocated) {
-    curr_size += GET_SIZE(HDRP(NEXT_BLCKP(bp)));
+    remove_allocated_block(next);
+    curr_size += GET_SIZE(HDRP(next));
 
-    PUT(FTRP(NEXT_BLCKP(bp)), PACK(curr_size, !ALLOCATED));
+    PUT(FTRP(next), PACK(curr_size, !ALLOCATED));
     PUT(HDRP(bp), PACK(curr_size, !ALLOCATED));
   }
 
   else {
-    curr_size +=
-        GET_SIZE(HDRP(NEXT_BLCKP(bp))) + GET_SIZE(HDRP(PREV_BLCKP(bp)));
+    curr_size += GET_SIZE(HDRP(next)) + GET_SIZE(HDRP(prev));
 
-    PUT(HDRP(PREV_BLCKP(bp)), PACK(curr_size, !ALLOCATED));
-    PUT(FTRP(NEXT_BLCKP(bp)), PACK(curr_size, !ALLOCATED));
+    remove_allocated_block(prev);
+    remove_allocated_block(next);
+    PUT(HDRP(prev), PACK(curr_size, !ALLOCATED));
+    PUT(FTRP(next), PACK(curr_size, !ALLOCATED));
 
-    bp = PREV_BLCKP(bp);
+    bp = prev;
   }
+  insert_free_block(bp);
 
+  //   mm_check();
   return bp;
 }
 
