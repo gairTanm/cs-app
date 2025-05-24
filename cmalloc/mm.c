@@ -140,12 +140,6 @@ void mm_check() {
 
 void *find_fit_ll(size_t asize) {
   //   unsigned int *start = (unsigned int *)_ell_start;
-
-  /*
-  for (start = _ell_start; start != _ell_end; start = start->next) {
-    if (!get_alloc(bp) && GET_SIZE(bp) >= asize)return start;
-  }
-  */
   void *bp;
 
   for (bp = _ell_start; (bp != 0x0) && (bp != NULL);) {
