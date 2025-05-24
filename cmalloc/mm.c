@@ -70,6 +70,58 @@ team_t team = {
 
 static char *heap_listp;
 
+/***************************************************
+ * ELL Implementation
+ ***************************************************/
+
+#define LIST_MASK ~0x0
+
+#define GET_PREV_FBLK(bp) (*(unsigned int *)(bp) & (LIST_MASK))
+#define GET_NEXT_FBLK(bp) (*(unsigned int *)(bp + LIST_MASK) & (LIST_MASK))
+
+static char *_ell_start;
+static char *_ell_end;
+/* Insert a free block naively at the start */
+void *insert_free_block(void *bp) {
+  unsigned int *prev_start = (unsigned int *)_ell_start;
+
+  /*
+  prev_start -> prev = bp;
+  bp->prev = null;
+  bp->next = prev_start;
+  */
+
+  return bp;
+}
+
+/* Given that a block has been allocated, remove it from the list */
+void *remove_allocated_block(void *bp) {
+  unsigned int *prev_start = (unsigned int *)_ell_start;
+
+  /*
+  bp->prev->next = bp->next->;
+  bp->next = prev_start;
+  */
+
+  return bp;
+}
+
+void *find_fit_ll(size_t asize) {
+  unsigned int *start = (unsigned int *)_ell_start;
+
+  /*
+  for (start = _ell_start; start != _ell_end; start = start->next) {
+    if (!get_alloc(bp) && GET_SIZE(bp) >= asize)return start;
+  }
+  */
+
+  return NULL;
+}
+
+/*****************************************
+ * ELL Implementation ends
+ *****************************************/
+
 static void *find_fit(size_t asize);
 static void *extend_heap(size_t words);
 static void *place(void *bp, size_t asize);
@@ -82,7 +134,6 @@ int mm_init(void) {
   // mem_heap()
 
   if ((heap_listp = mem_sbrk(4 * WSIZE)) == (void *)-1) {
-    // TODO: handle error
     return -1;
   };
 
@@ -91,6 +142,12 @@ int mm_init(void) {
   PUT(heap_listp + (WSIZE * 2), PACK(DSIZE, 1));
   PUT(heap_listp + (WSIZE * 3), PACK(0, 1));
   heap_listp += (2 * WSIZE);
+
+  // TODO: initialise list start and list end
+  // start -> bp
+  // end -> bp
+
+  //   _ell_start = _ell_end = bp;
 
   if (extend_heap(CHUNKSIZE / WSIZE) == NULL) {
     return -1;
