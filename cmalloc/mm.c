@@ -1,15 +1,8 @@
 /*
  * mm-naive.c - The fastest, least memory-efficient malloc package.
  *
- * In this naive approach, a block is allocated by simply incrementing
- * the brk pointer.  A block is pure payload. There are no headers or
- * footers.  Blocks are never coalesced or reused. Realloc is
- * implemented directly using mm_malloc and mm_free.
- *
- * Seglist explicit ll implementation
+ * Segmented explicit linked list implementation
  */
-#include "mm.h"
-
 #include <assert.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -17,6 +10,7 @@
 #include <unistd.h>
 
 #include "memlib.h"
+#include "mm.h"
 
 /*********************************************************
  * NOTE TO STUDENTS: Before you do anything else, please
@@ -34,40 +28,42 @@ team_t team = {
     /* Second member's email address (leave blank if none) */
     ""};
 
-/* single word (4) or double word (8) alignment */
-#define DSIZE 8
-
 #define WSIZE 4
-
-#define MIN_SIZE (2 * (DSIZE))
-
+#define DSIZE 8
 #define CHUNKSIZE (1 << 12)
 
-#define ALLOCATED 0x1
+/* single word (4) or double word (8) alignment */
+#define ALIGNMENT 8
+#define MAX(x, y) ((x) > (y) ? (x) : (y))
 
 /* rounds up to the nearest multiple of ALIGNMENT */
-#define ALIGN(size) (((size) + (DSIZE - 1)) & ~0x7)
-
-/* R/W word at address p*/
-#define PUT(p, val) (*(unsigned int *)(p) = (val))
-#define GET(p) (*(unsigned int *)(p))
+#define ALIGN(size) (((size) + (ALIGNMENT - 1)) & ~0x7)
 
 #define SIZE_T_SIZE (ALIGN(sizeof(size_t)))
 
-#define GET_SIZE(p) (GET(p) & ~0x7)
+#define PACK(word, alloc) ((word) | (alloc))
+
+#define GET(p) (*(unsigned int *)(p))
+#define PUT(p, val) (*(unsigned int *)(p) = (val))
+
 #define GET_ALLOC(p) (GET(p) & 0x1)
+#define GET_SIZE(p) (GET(p) & ~0x7)
 
 #define HDRP(bp) ((char *)(bp) - WSIZE)
 #define FTRP(bp) ((char *)(bp) + GET_SIZE(HDRP(bp)) - DSIZE)
 
-#define NEXT_BLCKP(bp) ((char *)(bp) + ((GET_SIZE(HDRP(bp)))))
-#define PREV_BLCKP(bp) ((char *)(bp) - GET_SIZE((char *)(bp) - DSIZE))
+#define N_BLK(bp) ((char *)(bp) + GET_SIZE(HDRP(bp)))
+#define P_BLK(bp) ((char *)(bp) - GET_SIZE((char *)(bp) - DSIZE))
 
-#define PACK(val, alloc) (val | alloc)
+static void *heap_listp;
 
-#define MAX(x, y) ((x) > (y) ? (x) : (y))
-
-static char *heap_listp;
+static void *get_fit(size_t asize);
+static void *
+find_fit(size_t asize) __attribute_maybe_unused__; // ignore compiler warnings
+static void *extend_heap(size_t words);
+static void place(void *bp, size_t asize);
+static void *coalesce(void *bp);
+static void mm_check(int alloc) __attribute_maybe_unused__;
 
 /***************************************************
  * SegList wrapper Implementation
@@ -75,11 +71,11 @@ static char *heap_listp;
 
 #define SEG_MAX 14 // 1<<14 max
 
+// seglist datastructure - head_nodes of the segmented lists
 static void *seglist_start[SEG_MAX];
 
 /* Given a free block size, get the index of the seglist it belongs to*/
 int get_index(size_t fbsize) {
-  // hello
   if (fbsize == 0)
     return -1;
   int idx = 63 - __builtin_clzll(fbsize);
@@ -90,10 +86,11 @@ int get_index(size_t fbsize) {
  * ELL Implementation
  ***************************************************/
 
-// #define LIST_MASK ~0x0
-
-#define PREV_FBLK(bp) (*(char **)(bp))
-#define NEXT_FBLK(bp) (*(char **)((char *)(bp) + WSIZE))
+#define PREV_FBLK(bp)                                                          \
+  (*(void *                                                                    \
+         *)(bp)) // (*(unsigned int *)(bp)) works fine for 32 bit (ul will
+                 // probably work for 62 bit) but causes the compiler to warn
+#define NEXT_FBLK(bp) (*(void **)((char *)(bp) + WSIZE))
 
 // static char *_ell_start;
 // static char *_ell_end;
@@ -101,6 +98,7 @@ int get_index(size_t fbsize) {
  * later) */
 void insert_free_block(void *bp) {
   /*
+  Idea for an individual ELL
   prev_start -> prev = bp;
   bp->prev = null;
   bp->next = prev_start;
@@ -119,49 +117,37 @@ void insert_free_block(void *bp) {
   seglist_start[index] = bp;
 }
 
-/* Given that a block has been allocated, remove it from the list */
+/* Remove a block from the list */
 void remove_free_block(void *bp) {
   /*
   bp->prev->next = bp->next;
   bp->next = prev_start;
   */
-  if (PREV_FBLK(bp))
+  if (PREV_FBLK(bp) && PREV_FBLK(bp) != 0x0)
     NEXT_FBLK(PREV_FBLK(bp)) = NEXT_FBLK(bp);
   else
     seglist_start[get_index(GET_SIZE(HDRP(bp)))] =
         NEXT_FBLK(bp); // In case bp is the start block
 
-  if (NEXT_FBLK(bp))
+  if (NEXT_FBLK(bp) && NEXT_FBLK(bp) != 0x0)
     PREV_FBLK(NEXT_FBLK(bp)) = PREV_FBLK(bp);
 
-  NEXT_FBLK(bp) = PREV_FBLK(bp) = NULL;
+  NEXT_FBLK(bp) = NULL;
+  PREV_FBLK(bp) = NULL;
 }
 
-void mm_check() {
-  //   char *bp = seglist_start[get_index(GET_SIZE(HDRP(bp)))];
-  //   int count = 0;
-
-  //   while (bp != NULL) {
-  //     if (count++ > 10000) {
-  //       printf("Cycle detected in free list!\n");
-  //       exit(1);
-  //     }
-
-  //     size_t size = GET_SIZE(HDRP(bp));
-  //     if (size == 0 || size % 8 != 0) {
-  //       printf("Corrupted block in free list!\n");
-  //       exit(1);
-  //     }
-
-  //     bp = NEXT_FBLK(bp);
-  //   }
-}
-
+/*
+ * Find the in a ELL - extended to use the seglist
+ * Get the node from seglist and apply ELL logic
+ */
 void *find_fit_ll(size_t asize) {
   //   unsigned int *start = (unsigned int *)_ell_start;
   void *bp;
   for (int i = get_index(asize); i < SEG_MAX; i++) {
-    for (bp = seglist_start[i]; (bp != 0x0) && (bp != NULL);) {
+    void *start = seglist_start[i];
+    if (start == NULL)
+      continue;
+    for (bp = start; (bp != 0x0) && (bp != NULL);) {
       if (GET_SIZE(HDRP(bp)) >= asize) {
         return bp;
       };
@@ -172,24 +158,13 @@ void *find_fit_ll(size_t asize) {
   return NULL;
 }
 
-/*****************************************
- * ELL Implementation ends
- *****************************************/
-
-static void *find_fit(size_t asize);
-static void *extend_heap(size_t words);
-static void place(void *bp, size_t asize);
-static void *coalesce(void *bp);
-
 /*
  * mm_init - initialize the malloc package.
  */
 int mm_init(void) {
-  // mem_heap()
-
   if ((heap_listp = mem_sbrk(4 * WSIZE)) == (void *)-1) {
     return -1;
-  };
+  }
 
   PUT(heap_listp, 0);
   PUT(heap_listp + (WSIZE * 1), PACK(DSIZE, 1));
@@ -197,14 +172,29 @@ int mm_init(void) {
   PUT(heap_listp + (WSIZE * 3), PACK(0, 1));
   heap_listp += (2 * WSIZE);
 
+  // initialize the seglist to nulls
   for (int i = 0; i < SEG_MAX; i++)
     seglist_start[i] = NULL;
 
   if (extend_heap(CHUNKSIZE / WSIZE) == NULL) {
     return -1;
   }
-
   return 0;
+}
+
+static void mm_check(int alloc) {
+  // traverse and print out the implicit list layout
+  void *bp;
+
+  printf(alloc ? "---op alloc---\n" : "---op free---\n");
+  printf("heapstart-> ");
+  for (bp = N_BLK(heap_listp); GET_SIZE(HDRP(bp)) > 0; bp = (N_BLK(bp))) {
+    printf(
+        "||bp: %p with hsize: %x fsize:%x (%d) and allocation status: %d|| -> ",
+        (unsigned int *)bp, GET_SIZE(HDRP(bp)), GET_SIZE(FTRP(bp)),
+        GET_SIZE(HDRP(bp)), GET_ALLOC(HDRP(bp)));
+  }
+  printf("heapend\n");
 }
 
 static void *extend_heap(size_t words) {
@@ -216,9 +206,10 @@ static void *extend_heap(size_t words) {
   if ((long)(bp = mem_sbrk(size)) == -1)
     return NULL;
 
-  PUT(HDRP(bp), PACK(size, !ALLOCATED));
-  PUT(FTRP(bp), PACK(size, !ALLOCATED));
-  PUT(HDRP(NEXT_BLCKP(bp)), PACK(0, ALLOCATED));
+  PUT(HDRP(bp), PACK(size, 0));
+  PUT(FTRP(bp), PACK(size, 0));
+  // void *nb = N_BLK(bp);
+  PUT(HDRP(N_BLK(bp)), PACK(0, 1));
 
   return coalesce(bp);
 }
@@ -228,129 +219,122 @@ static void *extend_heap(size_t words) {
  *     Always allocate a block whose size is a multiple of the alignment.
  */
 void *mm_malloc(size_t size) {
-  // int newsize = ALIGN(size + SIZE_T_SIZE);
-  // void *p = mem_sbrk(newsize);
-  // if (p == (void *)-1)
+  //   int newsize = ALIGN(size + SIZE_T_SIZE);
+  //   void *p = mem_sbrk(newsize);
+  //   if (p == (void *)-1)
   //     return NULL;
-  // else {
+  //   else {
   //     *(size_t *)p = size;
   //     return (void *)((char *)p + SIZE_T_SIZE);
-  // }
-  //
+  //   }
 
-  // x64 -- 111....111 (64 bits) -> 2^64
-  //   unsigned int(*p) = (unsigned int *)0xDEADBEEF; // 8 * 8 => 64
-
-  size_t asize;
+  size_t asize, extendsize;
   char *bp;
-  if (size < 2 * DSIZE) {
-    asize = 2 * DSIZE;
-  } else {
-    asize = DSIZE * ((size + (DSIZE) + (DSIZE - 1)) / DSIZE);
-  }
 
-  if ((bp = find_fit_ll(asize)) != NULL) {
+  if (size == 0)
+    return NULL;
+
+  if (size <= DSIZE)
+    asize = 2 * DSIZE;
+  else
+    asize = DSIZE * ((size + (DSIZE) + (DSIZE - 1)) / DSIZE);
+
+  if ((bp = get_fit(asize)) != NULL) {
     place(bp, asize);
+    // mm_check(1);
     return bp;
   }
 
-  size_t extendsize = MAX(asize, CHUNKSIZE);
+  extendsize = MAX(asize, CHUNKSIZE);
+
   if ((bp = extend_heap(extendsize / WSIZE)) == NULL)
     return NULL;
+
   place(bp, asize);
-
-  //   mm_check();
-
+  // mm_check(1);
   return bp;
 }
 
-void place(void *bp, size_t asize) {
-  size_t curr_size = GET_SIZE(HDRP(bp));
-
-  // remove from the ELL
-  remove_free_block(bp);
-
-  // standard placement logic
-  if ((curr_size - asize) >= MIN_SIZE) {
-    PUT(HDRP(bp), PACK(asize, ALLOCATED));
-    PUT(FTRP(bp), PACK(asize, ALLOCATED));
-    bp = NEXT_BLCKP(bp);
-    PUT(HDRP(bp), PACK((curr_size - asize), !ALLOCATED));
-    PUT(FTRP(bp), PACK((curr_size - asize), !ALLOCATED));
-
-    insert_free_block(bp);
-  } else {
-    PUT(HDRP(bp), PACK(curr_size, ALLOCATED));
-    PUT(FTRP(bp), PACK(curr_size, ALLOCATED));
-  }
-}
+/* Wrapper around "size fit" logic*/
+static void *get_fit(size_t asize) { return find_fit_ll(asize); }
 
 static void *find_fit(size_t asize) {
   void *bp;
 
-  for (bp = heap_listp; GET_SIZE(HDRP(bp)) != 0; bp = NEXT_BLCKP(bp)) {
-    if (!GET_ALLOC(HDRP(bp)) && GET_SIZE(HDRP(bp)) >= asize) {
+  for (bp = heap_listp; GET_SIZE(HDRP(bp)) > 0; bp = N_BLK(bp)) {
+    if (!GET_ALLOC(HDRP(bp)) && (asize <= GET_SIZE(HDRP(bp)))) {
       return bp;
     }
   }
   return NULL;
 }
 
+static void place(void *bp, size_t asize) {
+  size_t csize = GET_SIZE(HDRP(bp));
+
+  remove_free_block(bp);
+
+  if ((csize - asize) >= (2 * DSIZE)) {
+    PUT(HDRP(bp), PACK(asize, 1));
+    PUT(FTRP(bp), PACK(asize, 1));
+    bp = N_BLK(bp);
+    PUT(HDRP(bp), PACK(csize - asize, 0));
+    PUT(FTRP(bp), PACK(csize - asize, 0));
+    insert_free_block(bp);
+  } else {
+    PUT(HDRP(bp), PACK(csize, 1));
+    PUT(FTRP(bp), PACK(csize, 1));
+  }
+}
+
 /*
  * mm_free - Freeing a block does nothing.
  */
-void mm_free(void *ptr) {
-  size_t _size = GET_SIZE(HDRP(ptr));
+void mm_free(void *bp) {
+  size_t size = GET_SIZE(HDRP(bp));
 
-  PUT(HDRP(ptr), PACK(_size, !ALLOCATED));
-  PUT(FTRP(ptr), PACK(_size, !ALLOCATED));
+  PUT(HDRP(bp), PACK(size, 0));
+  PUT(FTRP(bp), PACK(size, 0));
 
-  coalesce(ptr);
-
-  //   mm_check();
+  coalesce(bp);
+  // mm_check(0);
 }
 
 static void *coalesce(void *bp) {
-  int prev_allocated = GET_ALLOC(FTRP(PREV_BLCKP(bp)));
-  int next_allocated = GET_ALLOC(HDRP(NEXT_BLCKP(bp)));
+  size_t prev_alloc = GET_ALLOC(FTRP(P_BLK(bp)));
+  size_t next_alloc = GET_ALLOC(HDRP(N_BLK(bp)));
+  size_t size = GET_SIZE(HDRP(bp));
 
-  size_t curr_size = GET_SIZE(HDRP(bp));
-  void *prev = PREV_BLCKP(bp);
-  void *next = NEXT_BLCKP(bp);
+  void *prev = P_BLK(bp);
+  void *next = N_BLK(bp);
+  if (prev_alloc && next_alloc) {
 
-  if (prev_allocated && next_allocated) {
-  }
+  } else if (prev_alloc && !next_alloc) {
+    size += GET_SIZE(HDRP(N_BLK(bp)));
 
-  else if (!prev_allocated && next_allocated) {
-    remove_free_block(prev);
-    curr_size += GET_SIZE(HDRP(prev));
-
-    PUT(HDRP(prev), PACK(curr_size, !ALLOCATED));
-    PUT(FTRP(bp), PACK(curr_size, !ALLOCATED));
-    bp = prev;
-  }
-
-  else if (prev_allocated && !next_allocated) {
     remove_free_block(next);
-    curr_size += GET_SIZE(HDRP(next));
+    PUT(HDRP(bp), PACK(size, 0));
+    PUT(FTRP(bp), PACK(size, 0));
+  } else if (!prev_alloc && next_alloc) {
+    size += GET_SIZE(HDRP(P_BLK(bp)));
 
-    PUT(FTRP(next), PACK(curr_size, !ALLOCATED));
-    PUT(HDRP(bp), PACK(curr_size, !ALLOCATED));
-  }
+    remove_free_block(prev);
+    PUT(FTRP(bp), PACK(size, 0));
+    PUT(HDRP(P_BLK(bp)), PACK(size, 0));
 
-  else {
-    curr_size += GET_SIZE(HDRP(next)) + GET_SIZE(HDRP(prev));
+    bp = P_BLK(bp);
+  } else {
+    size += GET_SIZE(HDRP(P_BLK(bp))) + GET_SIZE(FTRP(N_BLK(bp)));
 
     remove_free_block(prev);
     remove_free_block(next);
-    PUT(HDRP(prev), PACK(curr_size, !ALLOCATED));
-    PUT(FTRP(next), PACK(curr_size, !ALLOCATED));
+    PUT(HDRP(P_BLK(bp)), PACK(size, 0));
+    PUT(FTRP(N_BLK(bp)), PACK(size, 0));
 
-    bp = prev;
+    bp = P_BLK(bp);
   }
+
   insert_free_block(bp);
-
-  //   mm_check();
   return bp;
 }
 
@@ -365,16 +349,10 @@ void *mm_realloc(void *ptr, size_t size) {
   newptr = mm_malloc(size);
   if (newptr == NULL)
     return NULL;
-  size_t old_size =
-      GET_SIZE(HDRP(oldptr)); // block size including header/footer
-  copySize = old_size -
-             2 * SIZE_T_SIZE; // subtract header + footer to get payload size
-
+  copySize = *(size_t *)((char *)oldptr - SIZE_T_SIZE);
   if (size < copySize)
     copySize = size;
-
   memcpy(newptr, oldptr, copySize);
-
   mm_free(oldptr);
   return newptr;
 }
