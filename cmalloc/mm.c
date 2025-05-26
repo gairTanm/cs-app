@@ -4,6 +4,7 @@
  * Segmented explicit linked list implementation
  */
 #include <assert.h>
+#include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -35,9 +36,11 @@ team_t team = {
 /* single word (4) or double word (8) alignment */
 #define ALIGNMENT 8
 #define MAX(x, y) ((x) > (y) ? (x) : (y))
+#define MIN(x, y) ((x) < (y) ? (x) : (y))
 
 /* rounds up to the nearest multiple of ALIGNMENT */
-#define ALIGN(size) (((size) + (ALIGNMENT - 1)) & ~0x7)
+#define ALIGN(size) (DSIZE * ((size + (DSIZE) + (DSIZE - 1)) / DSIZE))
+#define ALIGN_NEAREST(size) (DSIZE * ((size + (DSIZE - 1)) / DSIZE))
 
 #define SIZE_T_SIZE (ALIGN(sizeof(size_t)))
 
@@ -65,6 +68,7 @@ static void *extend_heap(size_t words);
 static void place(void *bp, size_t asize);
 static void *coalesce(void *bp);
 static void mm_check(opcode_t opcode) __attribute_maybe_unused__;
+static void handle_segfault(int sig);
 
 /***************************************************
  * SegList wrapper Implementation
@@ -184,12 +188,13 @@ int mm_init(void) {
 }
 
 /******************************************
- * Check utils start
+ * Utils start
  ******************************************/
 
 static const opcode_t OP_FREE = "free";
 static const opcode_t OP_ALLOC = "alloc";
 static const opcode_t OP_REALLOC = "realloc";
+static const opcode_t OP_FAULT = "fatal error";
 
 static void mm_check(opcode_t op_code) {
   // traverse and print out the implicit list layout
@@ -207,8 +212,16 @@ static void mm_check(opcode_t op_code) {
 #endif
 }
 
+static void handle_segfault(int sig) {
+  printf("\nSIGSEGV\nDumping info through mm_check->");
+
+  mm_check(OP_FAULT);
+
+  exit(1);
+}
+
 /********************************************
- * Check utils end
+ * Utils end
  ********************************************/
 
 static void *extend_heap(size_t words) {
@@ -233,6 +246,7 @@ static void *extend_heap(size_t words) {
  *     Always allocate a block whose size is a multiple of the alignment.
  */
 void *mm_malloc(size_t size) {
+  mm_check("alloc init");
   //   int newsize = ALIGN(size + SIZE_T_SIZE);
   //   void *p = mem_sbrk(newsize);
   //   if (p == (void *)-1)
@@ -241,6 +255,7 @@ void *mm_malloc(size_t size) {
   //     *(size_t *)p = size;
   //     return (void *)((char *)p + SIZE_T_SIZE);
   //   }
+  signal(SIGSEGV, handle_segfault); // Register the handler
 
   size_t asize, extendsize;
   char *bp;
@@ -251,11 +266,11 @@ void *mm_malloc(size_t size) {
   if (size <= DSIZE)
     asize = 2 * DSIZE;
   else
-    asize = DSIZE * ((size + (DSIZE) + (DSIZE - 1)) / DSIZE);
+    asize = ALIGN(size);
 
   if ((bp = get_fit(asize)) != NULL) {
     place(bp, asize);
-    // mm_check(1);
+    mm_check(OP_ALLOC);
     return bp;
   }
 
@@ -302,7 +317,7 @@ static void place(void *bp, size_t asize) {
 }
 
 /*
- * mm_free - Freeing a block does nothing.
+ * mm_free - Freeing deallocates and coalesces the block
  */
 void mm_free(void *bp) {
   size_t size = GET_SIZE(HDRP(bp));
@@ -352,10 +367,139 @@ static void *coalesce(void *bp) {
   return bp;
 }
 
+#define OVERHEAD (2 * WSIZE)
+void *mm_realloc_(void *ptr, size_t size);
+void *old_mm_realloc(void *ptr, size_t size);
+
 /*
  * mm_realloc - Implemented simply in terms of mm_malloc and mm_free
  */
 void *mm_realloc(void *ptr, size_t size) {
+
+#ifdef DEBUG
+  printf("\n--------realloc execution-------------");
+  printf("\nptr to realloc: %p with size: %u\n", ptr, size);
+#endif
+  void *newptr = mm_realloc_(ptr, size);
+#ifdef DEBUG
+  printf("\n--------realloc executed-------------\n");
+#endif
+  return newptr;
+}
+
+int can_realloc_adjacent(void *ptr, size_t asize) {
+#ifdef DEBUG
+  printf("can realloc adjacent!!!!!\n");
+#endif
+  int prev_alloc = GET_ALLOC(P_BLK(ptr)), next_alloc = GET_ALLOC(N_BLK(ptr));
+  size_t prev_size = GET_SIZE(P_BLK(ptr)), next_size = GET_SIZE(N_BLK(ptr));
+  size_t curr_size = GET_SIZE(ptr);
+
+  if (!next_alloc && next_size + curr_size >= asize) {
+    return 1;
+  }
+
+  if (!prev_alloc && prev_size + curr_size >= asize) {
+    return 2;
+  }
+
+  if (!prev_alloc && !next_alloc &&
+      prev_size + next_size + curr_size >= asize) {
+    return 3;
+  }
+#ifdef DEBUG
+  printf("cant realloc adjacent!!!!!\n");
+#endif
+  return 0;
+}
+
+void *realloc_adjacent(void *ptr, size_t asize, int type) {
+  size_t curr_size = GET_SIZE(ptr);
+  switch (type) {
+  case 1:
+    curr_size += GET_SIZE(N_BLK(ptr));
+    PUT(HDRP(ptr), PACK(asize, 1));
+    PUT(FTRP(ptr), PACK(asize, 1));
+
+    if (curr_size - asize >= (2 * DSIZE)) {
+      PUT(HDRP(N_BLK(ptr)), PACK(curr_size - asize, 0));
+      PUT(FTRP(N_BLK(ptr)), PACK(curr_size - asize, 0));
+      coalesce(N_BLK(ptr));
+    }
+    break;
+  case 2:
+    curr_size += GET_SIZE(P_BLK(ptr));
+    PUT(HDRP(P_BLK(ptr)), PACK(asize, 1));
+    PUT(FTRP(P_BLK(ptr)), PACK(asize, 1));
+    ptr = P_BLK(ptr);
+    if (curr_size - asize >= (2 * DSIZE)) {
+      PUT(HDRP(N_BLK(ptr)), PACK(curr_size - asize, 0));
+      PUT(FTRP(N_BLK(ptr)), PACK(curr_size - asize, 0));
+      coalesce(N_BLK(ptr));
+    }
+    break;
+  case 3:
+    curr_size += GET_SIZE(P_BLK(ptr)) + GET_SIZE(N_BLK(ptr));
+    PUT(HDRP(P_BLK(ptr)), PACK(asize, 1));
+    PUT(FTRP(P_BLK(ptr)), PACK(asize, 1));
+    ptr = P_BLK(ptr);
+    if (curr_size - asize >= (2 * DSIZE)) {
+      PUT(HDRP(N_BLK(ptr)), PACK(curr_size - asize, 0));
+      PUT(FTRP(N_BLK(ptr)), PACK(curr_size - asize, 0));
+      coalesce(N_BLK(ptr));
+    }
+    break;
+  }
+
+  return ptr;
+}
+
+void *mm_realloc_(void *ptr, size_t size) {
+  void *oldptr = ptr;
+  void *newptr;
+  size_t copySize;
+
+  // Base cases
+  if (ptr == NULL) {
+
+    return mm_malloc(size);
+  }
+  if (size == 0) {
+    mm_free(ptr);
+    return;
+  }
+
+#ifdef DEBUG
+  printf("size + overhead: %d", size + OVERHEAD);
+#endif
+  copySize = GET_SIZE(HDRP(ptr));
+  size_t asize = ALIGN(size);
+  if (asize <= copySize) {
+    if (copySize - asize >= (2 * DSIZE)) {
+      PUT(HDRP(N_BLK(ptr)), PACK(copySize - asize, 0));
+      PUT(FTRP(N_BLK(ptr)), PACK(copySize - asize, 0));
+      coalesce(N_BLK(ptr));
+    }
+    mm_check(OP_REALLOC);
+    return ptr;
+  }
+  int adjacent_realloc_type;
+  if (1) {
+    newptr = mm_malloc(asize);
+    if (newptr == NULL)
+      return NULL;
+
+    memcpy(newptr, oldptr, copySize);
+    mm_free(oldptr);
+    mm_check(OP_REALLOC);
+    return newptr;
+  }
+
+  return realloc_adjacent(ptr, asize, adjacent_realloc_type);
+}
+
+/* bad :(*/
+void *old_mm_realloc(void *ptr, size_t size) {
   void *oldptr = ptr;
   void *newptr;
   size_t copySize;
@@ -373,19 +517,10 @@ void *mm_realloc(void *ptr, size_t size) {
   }
 
   copySize = GET_SIZE(HDRP(oldptr));
-  if (size <= copySize) {
-    PUT(HDRP(oldptr), PACK(size, 1));
-    PUT(FTRP(oldptr), PACK(size, 1));
-
-    mm_free(N_BLK(oldptr));
-    mm_check(OP_REALLOC);
-    return oldptr;
-  }
 
   newptr = mm_malloc(size);
   if (newptr == NULL)
     return NULL;
-  // copySize = *(size_t *)((char *)oldptr - SIZE_T_SIZE);
   if (size < copySize)
     copySize = size;
   memcpy(newptr, oldptr, copySize);
