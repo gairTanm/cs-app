@@ -55,6 +55,7 @@ team_t team = {
 #define N_BLK(bp) ((char *)(bp) + GET_SIZE(HDRP(bp)))
 #define P_BLK(bp) ((char *)(bp) - GET_SIZE((char *)(bp) - DSIZE))
 
+typedef char *opcode_t;
 static void *heap_listp;
 
 static void *get_fit(size_t asize);
@@ -63,7 +64,7 @@ find_fit(size_t asize) __attribute_maybe_unused__; // ignore compiler warnings
 static void *extend_heap(size_t words);
 static void place(void *bp, size_t asize);
 static void *coalesce(void *bp);
-static void mm_check(int alloc) __attribute_maybe_unused__;
+static void mm_check(opcode_t opcode) __attribute_maybe_unused__;
 
 /***************************************************
  * SegList wrapper Implementation
@@ -182,11 +183,19 @@ int mm_init(void) {
   return 0;
 }
 
-static void mm_check(int alloc) {
+/******************************************
+ * Check utils start
+ ******************************************/
+
+static const opcode_t OP_FREE = "free";
+static const opcode_t OP_ALLOC = "alloc";
+static const opcode_t OP_REALLOC = "realloc";
+
+static void mm_check(opcode_t op_code) {
   // traverse and print out the implicit list layout
   void *bp;
-
-  printf(alloc ? "---op alloc---\n" : "---op free---\n");
+#ifdef DEBUG
+  printf("\n---op %s---\n", op_code);
   printf("heapstart-> ");
   for (bp = N_BLK(heap_listp); GET_SIZE(HDRP(bp)) > 0; bp = (N_BLK(bp))) {
     printf(
@@ -195,7 +204,12 @@ static void mm_check(int alloc) {
         GET_SIZE(HDRP(bp)), GET_ALLOC(HDRP(bp)));
   }
   printf("heapend\n");
+#endif
 }
+
+/********************************************
+ * Check utils end
+ ********************************************/
 
 static void *extend_heap(size_t words) {
   char *bp;
@@ -251,7 +265,7 @@ void *mm_malloc(size_t size) {
     return NULL;
 
   place(bp, asize);
-  // mm_check(1);
+  mm_check(OP_ALLOC);
   return bp;
 }
 
@@ -297,7 +311,7 @@ void mm_free(void *bp) {
   PUT(FTRP(bp), PACK(size, 0));
 
   coalesce(bp);
-  // mm_check(0);
+  mm_check(OP_FREE);
 }
 
 static void *coalesce(void *bp) {
@@ -346,10 +360,32 @@ void *mm_realloc(void *ptr, size_t size) {
   void *newptr;
   size_t copySize;
 
+  // Base cases
+  if (ptr == NULL) {
+
+    mm_check(OP_REALLOC);
+    return mm_malloc(size);
+  }
+  if (size == 0) {
+    mm_free(ptr);
+    mm_check(OP_REALLOC);
+    return;
+  }
+
+  copySize = GET_SIZE(HDRP(oldptr));
+  if (size <= copySize) {
+    PUT(HDRP(oldptr), PACK(size, 1));
+    PUT(FTRP(oldptr), PACK(size, 1));
+
+    mm_free(N_BLK(oldptr));
+    mm_check(OP_REALLOC);
+    return oldptr;
+  }
+
   newptr = mm_malloc(size);
   if (newptr == NULL)
     return NULL;
-  copySize = *(size_t *)((char *)oldptr - SIZE_T_SIZE);
+  // copySize = *(size_t *)((char *)oldptr - SIZE_T_SIZE);
   if (size < copySize)
     copySize = size;
   memcpy(newptr, oldptr, copySize);
