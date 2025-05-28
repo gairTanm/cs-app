@@ -367,7 +367,19 @@ static void *coalesce(void *bp) {
   return bp;
 }
 
+/*************************************************
+ * REALLOC implementation
+ *************************************************/
+
 #define OVERHEAD (2 * WSIZE)
+
+typedef enum adjacent_realloc_t {
+  ADJ_REALLOC_NO_OP = 0,
+  ADJ_REALLOC_NEXT = 1,
+  ADJ_REALLOC_PREV = 2,
+  ADJ_REALLOC_ALL = 3
+} adjacent_realloc_t;
+
 void *mm_realloc_(void *ptr, size_t size);
 void *old_mm_realloc(void *ptr, size_t size);
 
@@ -387,71 +399,91 @@ void *mm_realloc(void *ptr, size_t size) {
   return newptr;
 }
 
-int can_realloc_adjacent(void *ptr, size_t asize) {
-#ifdef DEBUG
-  printf("can realloc adjacent!!!!!\n");
-#endif
-  int prev_alloc = GET_ALLOC(P_BLK(ptr)), next_alloc = GET_ALLOC(N_BLK(ptr));
-  size_t prev_size = GET_SIZE(P_BLK(ptr)), next_size = GET_SIZE(N_BLK(ptr));
-  size_t curr_size = GET_SIZE(ptr);
+adjacent_realloc_t can_realloc_adjacent(void *ptr, size_t asize) {
+  int prev_alloc = GET_ALLOC(HDRP(P_BLK(ptr))),
+      next_alloc = GET_ALLOC(HDRP(N_BLK(ptr)));
+  size_t prev_size = GET_SIZE(HDRP(P_BLK(ptr))),
+         next_size = GET_SIZE(HDRP(N_BLK(ptr)));
+  size_t curr_size = GET_SIZE(HDRP(ptr));
 
-  if (!next_alloc && next_size + curr_size >= asize) {
-    return 1;
+  if (!next_alloc && (next_size + curr_size) >= asize) {
+    return ADJ_REALLOC_NEXT; // prefer this because we won't need to memcpy
   }
-
-  if (!prev_alloc && prev_size + curr_size >= asize) {
-    return 2;
+  if (!prev_alloc && (prev_size + curr_size) >= asize) {
+    return ADJ_REALLOC_PREV;
   }
-
   if (!prev_alloc && !next_alloc &&
-      prev_size + next_size + curr_size >= asize) {
-    return 3;
+      (prev_size + next_size + curr_size) >= asize) {
+    return ADJ_REALLOC_ALL;
   }
+
 #ifdef DEBUG
   printf("cant realloc adjacent!!!!!\n");
 #endif
-  return 0;
+  return ADJ_REALLOC_NO_OP;
 }
 
-void *realloc_adjacent(void *ptr, size_t asize, int type) {
-  size_t curr_size = GET_SIZE(ptr);
+void *realloc_adjacent(void *bp, size_t asize, adjacent_realloc_t type) {
+#ifdef DEBUG
+  printf("\nrealloc type: %d", type);
+#endif
+  size_t csize = GET_SIZE(HDRP(bp));
   switch (type) {
-  case 1:
-    curr_size += GET_SIZE(N_BLK(ptr));
-    PUT(HDRP(ptr), PACK(asize, 1));
-    PUT(FTRP(ptr), PACK(asize, 1));
+  case ADJ_REALLOC_NEXT:
+    csize += GET_SIZE(HDRP(N_BLK(bp)));
+    remove_free_block(N_BLK(bp));
+    if ((csize - asize) >= (2 * DSIZE)) {
+      PUT(HDRP(bp), PACK(asize, 1));
+      PUT(FTRP(bp), PACK(asize, 1));
 
-    if (curr_size - asize >= (2 * DSIZE)) {
-      PUT(HDRP(N_BLK(ptr)), PACK(curr_size - asize, 0));
-      PUT(FTRP(N_BLK(ptr)), PACK(curr_size - asize, 0));
-      coalesce(N_BLK(ptr));
+      PUT(HDRP(N_BLK(bp)), PACK(csize - asize, 0));
+      PUT(FTRP(N_BLK(bp)), PACK(csize - asize, 0));
+      insert_free_block(N_BLK(bp));
+    } else {
+      PUT(HDRP(bp), PACK(csize, 1));
+      PUT(FTRP(bp), PACK(csize, 1));
     }
     break;
-  case 2:
-    curr_size += GET_SIZE(P_BLK(ptr));
-    PUT(HDRP(P_BLK(ptr)), PACK(asize, 1));
-    PUT(FTRP(P_BLK(ptr)), PACK(asize, 1));
-    ptr = P_BLK(ptr);
-    if (curr_size - asize >= (2 * DSIZE)) {
-      PUT(HDRP(N_BLK(ptr)), PACK(curr_size - asize, 0));
-      PUT(FTRP(N_BLK(ptr)), PACK(curr_size - asize, 0));
-      coalesce(N_BLK(ptr));
+  case ADJ_REALLOC_PREV:
+    csize += GET_SIZE(HDRP(P_BLK(bp)));
+    remove_free_block(P_BLK(bp));
+    bp = P_BLK(bp);
+    memcpy(bp, N_BLK(bp), GET_SIZE(HDRP(N_BLK(bp))));
+    if ((csize - asize) >= (2 * DSIZE)) {
+      PUT(HDRP(bp), PACK(asize, 1));
+      PUT(FTRP(bp), PACK(asize, 1));
+
+      PUT(HDRP(N_BLK(bp)), PACK(csize - asize, 0));
+      PUT(FTRP(N_BLK(bp)), PACK(csize - asize, 0));
+      insert_free_block(N_BLK(bp));
+    } else {
+      PUT(HDRP(bp), PACK(csize, 1));
+      PUT(FTRP(bp), PACK(csize, 1));
     }
     break;
-  case 3:
-    curr_size += GET_SIZE(P_BLK(ptr)) + GET_SIZE(N_BLK(ptr));
-    PUT(HDRP(P_BLK(ptr)), PACK(asize, 1));
-    PUT(FTRP(P_BLK(ptr)), PACK(asize, 1));
-    ptr = P_BLK(ptr);
-    if (curr_size - asize >= (2 * DSIZE)) {
-      PUT(HDRP(N_BLK(ptr)), PACK(curr_size - asize, 0));
-      PUT(FTRP(N_BLK(ptr)), PACK(curr_size - asize, 0));
-      coalesce(N_BLK(ptr));
+  case ADJ_REALLOC_ALL:
+    csize += GET_SIZE(HDRP(P_BLK(bp))) + GET_SIZE(HDRP(N_BLK(bp)));
+    remove_free_block(P_BLK(bp));
+    remove_free_block(N_BLK(bp));
+    bp = P_BLK(bp);
+    memcpy(bp, N_BLK(bp), GET_SIZE(HDRP(N_BLK(bp))));
+    if ((csize - asize) >= (2 * DSIZE)) {
+      PUT(HDRP(bp), PACK(asize, 1));
+      PUT(FTRP(bp), PACK(asize, 1));
+
+      PUT(HDRP(N_BLK(bp)), PACK(csize - asize, 0));
+      PUT(FTRP(N_BLK(bp)), PACK(csize - asize, 0));
+      insert_free_block(N_BLK(bp));
+    } else {
+      PUT(HDRP(bp), PACK(csize, 1));
+      PUT(FTRP(bp), PACK(csize, 1));
     }
+    memcpy(bp, N_BLK(bp), asize);
     break;
   }
 
-  return ptr;
+  mm_check(OP_REALLOC);
+  return bp;
 }
 
 void *mm_realloc_(void *ptr, size_t size) {
@@ -483,8 +515,10 @@ void *mm_realloc_(void *ptr, size_t size) {
     mm_check(OP_REALLOC);
     return ptr;
   }
-  int adjacent_realloc_type;
-  if (1) {
+  adjacent_realloc_t adjacent_realloc_type;
+  adjacent_realloc_type = can_realloc_adjacent(ptr, asize);
+
+  if (adjacent_realloc_type == ADJ_REALLOC_NO_OP) {
     newptr = mm_malloc(asize);
     if (newptr == NULL)
       return NULL;
