@@ -9,6 +9,8 @@
 #include <stdio.h>
 #include <string.h>
 
+/*#include <cstdio>*/
+
 #include "csapp.h"
 
 /* Recommended max cache and object sizes */
@@ -25,7 +27,7 @@ int parse_url(const char *url, char *hostname, char *port, char *path);
 /* You won't lose style points for including this long line in your code */
 static const char *user_agent_hdr =
     "User-Agent: Mozilla/5.0 (X11; Linux arm64; rv:10.0.3) Gecko/20120305 "
-    "Firefox/10.0.3\r\n";
+    "Firefox/10.0.3";
 
 int main(int argc, char **argv) {
     int listenfd, connfd;
@@ -59,23 +61,19 @@ int main(int argc, char **argv) {
 }
 
 void routeit(int connfd) {
-    /*int is_static;*/
     struct stat sbuf;
     char buf[MAXLINE], method[MAXLINE], uri[MAXLINE], version[MAXLINE];
     char filename[MAXLINE], cgiargs[MAXLINE];
     char uri_with_port[MAXLINE];
-    /*char hostname[MAXLINE];*/
     char *hosthdr;
     int bytes_read, bytes_sent;
-    rio_t rio;
+    rio_t rio, rio_target;
     char hostname[256], port[6], path[256];
 
     /* Read request line and headers */
     Rio_readinitb(&rio, connfd);
     if (!Rio_readlineb(&rio, buf, MAXLINE)) return;
-    printf("%s", buf);
     sscanf(buf, "%s %s %s", method, uri, version);
-    printf("uri: %s\n", uri);
     if (strcasecmp(method, "GET")) {
         clienterror(connfd, method, "501", "Not Implemented",
                     "proxy does not implement this method (yet)");
@@ -89,14 +87,27 @@ void routeit(int connfd) {
     printf("hostname: %s uri: %s port: %s path: %s\n", hostname, uri, port,
            path);
     int clientfd = Open_clientfd(hostname, port);
+    printf("Forwarding request to %s\n", hostname);
+    Rio_readinitb(&rio_target, clientfd);
+    char targetbuf[MAXLINE];
 
-    Rio_readinitb(&rio, clientfd);
+    sprintf(targetbuf, "%s %s HTTP/1.0\r\n", method, path);
+    Rio_writen(clientfd, targetbuf, strlen(targetbuf));
+    sprintf(targetbuf, "Host: %s:%s\r\n", hostname, port);
+    Rio_writen(clientfd, targetbuf, strlen(targetbuf));
+    sprintf(targetbuf, "%s\r\n", user_agent_hdr);
+    Rio_writen(clientfd, targetbuf, strlen(targetbuf));
+    sprintf(targetbuf, "Connection: close\r\n");
+    Rio_writen(clientfd, targetbuf, strlen(targetbuf));
+    sprintf(targetbuf, "Proxy-Connection: close\r\n\r\n");
+    Rio_writen(clientfd, targetbuf, strlen(targetbuf));
 
-    Rio_writen(clientfd, buf, strlen(buf));
-    while ((bytes_read = Rio_readlineb(&rio, buf, MAXLINE)) > 0) {
+    printf("Wrote request to %s %d, sending response\n", hostname, strlen(buf));
+    while ((bytes_read = Rio_readlineb(&rio_target, buf, MAXLINE)) != 0) {
+        if (bytes_read <= 0) break;
         Rio_writen(connfd, buf, bytes_read);
     }
-
+    printf("Closing connection");
     Close(clientfd);
 }
 
@@ -166,9 +177,9 @@ char *read_requesthdrs(rio_t *rp) {
     /*printf("%s %u", buf, strlen(buf));*/
     hosthdr = malloc(strlen(buf) + 1);
     strcpy(hosthdr, buf);
-    while (strcmp(buf, "\r\n")) {  // line:netp:readhdrs:checkterm
-        Rio_readlineb(rp, buf, MAXLINE);
-        printf("%s", buf);
-    }
+    /*while (strcmp(buf, "\r\n")) {  // line:netp:readhdrs:checkterm*/
+    /*    Rio_readlineb(rp, buf, MAXLINE);*/
+    /*    printf("%s", buf);*/
+    /*}*/
     return hosthdr;
 }
