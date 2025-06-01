@@ -19,7 +19,7 @@
 #define MAXHEADERS 20
 
 char *read_requesthdrs(rio_t *rp);
-void routeit(int connfd);
+void *routeit(void *vargp);
 void clienterror(int fd, char *cause, char *errnum, char *shortmsg,
                  char *longmsg);
 int parse_url(const char *url, char *hostname, char *port, char *path);
@@ -34,10 +34,11 @@ static const char *user_agent_hdr =
     "Firefox/10.0.3";
 
 int main(int argc, char **argv) {
-    int listenfd, connfd;
+    int listenfd, *connfd;
     struct sockaddr_storage clientaddr;
     socklen_t clientlen;
     char hostname[MAXLINE], port[MAXLINE];
+    pthread_t tid;
 
     printf("%s", user_agent_hdr);
     if (argc < 2) {
@@ -52,19 +53,25 @@ int main(int argc, char **argv) {
 
     while (1) {
         clientlen = sizeof(clientaddr);
-
-        connfd = Accept(listenfd, (SA *)&clientaddr, &clientlen);
+        connfd = Malloc(sizeof(int));
+        *connfd = Accept(listenfd, (SA *)&clientaddr, &clientlen);
         Getnameinfo((SA *)&clientaddr, clientlen, hostname, MAXLINE, port,
                     MAXLINE, 0);
         printf("Routing connection for (%s, %s)\n", hostname, port);
-        routeit(connfd);
-        Close(connfd);
+        Pthread_create(&tid, NULL, routeit, connfd);
     }
 
     return 0;
 }
 
-void routeit(int connfd) {
+void *routeit(void *vargp) {
+    int connfd = *((int *)vargp);
+    unsigned tid = *((unsigned *)Pthread_self());
+    Pthread_detach(Pthread_self());
+
+    Free(vargp);
+
+    sleep(5);
     char buf[MAXLINE], method[MAXLINE], uri[MAXLINE], version[MAXLINE];
     int bytes_read;
     rio_t rio, rio_target;
@@ -72,22 +79,22 @@ void routeit(int connfd) {
 
     /* Read request line and headers */
     Rio_readinitb(&rio, connfd);
-    if (!Rio_readlineb(&rio, buf, MAXLINE)) return;
+    if (!Rio_readlineb(&rio, buf, MAXLINE)) return NULL;
     sscanf(buf, "%s %s %s", method, uri, version);
     if (strcasecmp(method, "GET")) {
         clienterror(connfd, method, "501", "Not Implemented",
                     "proxy does not implement this method (yet)");
-        return;
+        return NULL;
     }
 
     parse_url(uri, hostname, port, path);
 
     int clientfd = Open_clientfd(hostname, port);
     if (clientfd < 0) {
-        printf("Couldn't connect to server\n");
-        return;
+        printf("[%u]: Couldn't connect to server\n", tid);
+        return NULL;
     }
-    printf("Forwarding request to %s\n", hostname);
+    printf("[%u]: Forwarding request to %s\n",tid, hostname);
 
     forward_customhdrs(&rio_target, clientfd, method, path, hostname, port);
     forward_requesthdrs(&rio, buf, clientfd);
@@ -95,13 +102,17 @@ void routeit(int connfd) {
     // End the request byte stream
     Rio_writen(clientfd, "\r\n", strlen(buf));
 
-    printf("Wrote request to %s, sending response\n", hostname);
+    printf("[%u]: Wrote request to %s, sending response\n", tid ,hostname);
     while ((bytes_read = Rio_readlineb(&rio_target, buf, MAXLINE)) != 0) {
         if (bytes_read <= 0) break;
         Rio_writen(connfd, buf, bytes_read);
     }
-    printf("Closing connection\n");
+    printf("[%u]: Closing connection\n", tid);
+
     Close(clientfd);
+    Close(connfd);
+
+    return NULL;
 }
 
 int parse_url(const char *url, char *hostname, char *port, char *path) {
