@@ -6,8 +6,10 @@
 // TODO: get it working using csapp.c, then implement your own helpers to
 // understand it better
 
+#include <signal.h>
 #include <stdio.h>
 #include <string.h>
+
 
 /*#include <cstdio>*/
 
@@ -27,6 +29,7 @@ void read_extrahdrs(rio_t *rp, char *targetbuf);
 void forward_customhdrs(rio_t *rio_target, int clientfd, char *method,
                         char *path, char *hostname, char *port);
 void forward_requesthdrs(rio_t *rio, char *buf, int clientfd);
+void sigpipe_handler(int sig);
 
 /* You won't lose style points for including this long line in your code */
 static const char *user_agent_hdr =
@@ -39,6 +42,8 @@ int main(int argc, char **argv) {
     socklen_t clientlen;
     char hostname[MAXLINE], port[MAXLINE];
     pthread_t tid;
+
+    signal(SIGPIPE, sigpipe_handler);
 
     printf("%s", user_agent_hdr);
     if (argc < 2) {
@@ -71,7 +76,7 @@ void *routeit(void *vargp) {
 
     Free(vargp);
 
-    sleep(5);
+    /*sleep(5);*/  // simulate a delay
     char buf[MAXLINE], method[MAXLINE], uri[MAXLINE], version[MAXLINE];
     int bytes_read;
     rio_t rio, rio_target;
@@ -94,7 +99,7 @@ void *routeit(void *vargp) {
         printf("[%u]: Couldn't connect to server\n", tid);
         return NULL;
     }
-    printf("[%u]: Forwarding request to %s\n",tid, hostname);
+    printf("[%u]: Forwarding request to %s\n", tid, hostname);
 
     forward_customhdrs(&rio_target, clientfd, method, path, hostname, port);
     forward_requesthdrs(&rio, buf, clientfd);
@@ -102,7 +107,7 @@ void *routeit(void *vargp) {
     // End the request byte stream
     Rio_writen(clientfd, "\r\n", strlen(buf));
 
-    printf("[%u]: Wrote request to %s, sending response\n", tid ,hostname);
+    printf("[%u]: Wrote request to %s, sending response\n", tid, hostname);
     while ((bytes_read = Rio_readlineb(&rio_target, buf, MAXLINE)) != 0) {
         if (bytes_read <= 0) break;
         Rio_writen(connfd, buf, bytes_read);
@@ -198,4 +203,9 @@ void forward_requesthdrs(rio_t *rio, char *buf, int clientfd) {
             continue;
         Rio_writen(clientfd, buf, strlen(buf));
     }
+}
+
+void sigpipe_handler(int sig) {
+    printf("continuing on a sigpipe\n");
+    return;
 }
