@@ -23,6 +23,10 @@ void routeit(int connfd);
 void clienterror(int fd, char *cause, char *errnum, char *shortmsg,
                  char *longmsg);
 int parse_url(const char *url, char *hostname, char *port, char *path);
+void read_extrahdrs(rio_t *rp, char *targetbuf);
+void forward_customhdrs(rio_t *rio_target, int clientfd, char *method,
+                        char *path, char *hostname, char *port);
+void forward_requesthdrs(rio_t *rio, char *buf, int clientfd);
 
 /* You won't lose style points for including this long line in your code */
 static const char *user_agent_hdr =
@@ -61,12 +65,8 @@ int main(int argc, char **argv) {
 }
 
 void routeit(int connfd) {
-    struct stat sbuf;
     char buf[MAXLINE], method[MAXLINE], uri[MAXLINE], version[MAXLINE];
-    char filename[MAXLINE], cgiargs[MAXLINE];
-    char uri_with_port[MAXLINE];
-    char *hosthdr;
-    int bytes_read, bytes_sent;
+    int bytes_read;
     rio_t rio, rio_target;
     char hostname[256], port[6], path[256];
 
@@ -79,35 +79,28 @@ void routeit(int connfd) {
                     "proxy does not implement this method (yet)");
         return;
     }
-    hosthdr = read_requesthdrs(&rio);
 
-    /*modify_request();*/
     parse_url(uri, hostname, port, path);
 
-    printf("hostname: %s uri: %s port: %s path: %s\n", hostname, uri, port,
-           path);
     int clientfd = Open_clientfd(hostname, port);
+    if (clientfd < 0) {
+        printf("Couldn't connect to server\n");
+        return;
+    }
     printf("Forwarding request to %s\n", hostname);
-    Rio_readinitb(&rio_target, clientfd);
-    char targetbuf[MAXLINE];
 
-    sprintf(targetbuf, "%s %s HTTP/1.0\r\n", method, path);
-    Rio_writen(clientfd, targetbuf, strlen(targetbuf));
-    sprintf(targetbuf, "Host: %s:%s\r\n", hostname, port);
-    Rio_writen(clientfd, targetbuf, strlen(targetbuf));
-    sprintf(targetbuf, "%s\r\n", user_agent_hdr);
-    Rio_writen(clientfd, targetbuf, strlen(targetbuf));
-    sprintf(targetbuf, "Connection: close\r\n");
-    Rio_writen(clientfd, targetbuf, strlen(targetbuf));
-    sprintf(targetbuf, "Proxy-Connection: close\r\n\r\n");
-    Rio_writen(clientfd, targetbuf, strlen(targetbuf));
+    forward_customhdrs(&rio_target, clientfd, method, path, hostname, port);
+    forward_requesthdrs(&rio, buf, clientfd);
 
-    printf("Wrote request to %s %d, sending response\n", hostname, strlen(buf));
+    // End the request byte stream
+    Rio_writen(clientfd, "\r\n", strlen(buf));
+
+    printf("Wrote request to %s, sending response\n", hostname);
     while ((bytes_read = Rio_readlineb(&rio_target, buf, MAXLINE)) != 0) {
         if (bytes_read <= 0) break;
         Rio_writen(connfd, buf, bytes_read);
     }
-    printf("Closing connection");
+    printf("Closing connection\n");
     Close(clientfd);
 }
 
@@ -166,20 +159,32 @@ void clienterror(int fd, char *cause, char *errnum, char *shortmsg,
     Rio_writen(fd, buf, strlen(buf));
 }
 
-char *read_requesthdrs(rio_t *rp) {
-    char buf[MAXLINE];
-    char *hosthdr;
-    /*char *headers[MAXHEADERS];*/
-    int i = 0;
+void forward_customhdrs(rio_t *rio_target, int clientfd, char *method,
+                        char *path, char *hostname, char *port) {
+    char targetbuf[MAXLINE];
+    Rio_readinitb(rio_target, clientfd);
 
-    printf("Reading headers:\n");
-    Rio_readlineb(rp, buf, MAXLINE);
-    /*printf("%s %u", buf, strlen(buf));*/
-    hosthdr = malloc(strlen(buf) + 1);
-    strcpy(hosthdr, buf);
-    /*while (strcmp(buf, "\r\n")) {  // line:netp:readhdrs:checkterm*/
-    /*    Rio_readlineb(rp, buf, MAXLINE);*/
-    /*    printf("%s", buf);*/
-    /*}*/
-    return hosthdr;
+    sprintf(targetbuf, "%s %s HTTP/1.0\r\n", method, path);
+    Rio_writen(clientfd, targetbuf, strlen(targetbuf));
+    sprintf(targetbuf, "Host: %s:%s\r\n", hostname, port);
+    Rio_writen(clientfd, targetbuf, strlen(targetbuf));
+    sprintf(targetbuf, "%s\r\n", user_agent_hdr);
+    Rio_writen(clientfd, targetbuf, strlen(targetbuf));
+    sprintf(targetbuf, "Connection: close\r\n");
+    Rio_writen(clientfd, targetbuf, strlen(targetbuf));
+    sprintf(targetbuf, "Proxy-Connection: close\r\n");
+    Rio_writen(clientfd, targetbuf, strlen(targetbuf));
+}
+
+void forward_requesthdrs(rio_t *rio, char *buf, int clientfd) {
+    Rio_readlineb(rio, buf, MAXLINE);
+    while (strcmp(buf, "\r\n")) {
+        Rio_readlineb(rio, buf, MAXLINE);
+        if (!(strncmp(buf, "Host", 4) &&
+              strncmp(buf, "Connection:", strlen("Connection:")) &&
+              strncmp(buf, "Proxy-Connection:", strlen("Proxy-Connection:")) &&
+              strncmp(buf, "User-Agent:", strlen("User-Agent:"))))
+            continue;
+        Rio_writen(clientfd, buf, strlen(buf));
+    }
 }
